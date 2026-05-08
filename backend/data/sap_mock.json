@@ -1,0 +1,97 @@
+{
+  "default_account_id": "DHL001",
+  "payment_methods": [
+    {
+      "id": "mybill",
+      "label": "DHL MyBill self-serve portal",
+      "details": "Customer logs in at mybill.dhl.com with their registered email and password, picks the invoice, and pays online. This is the primary self-serve channel and the same portal where invoice copies can be downloaded."
+    },
+    {
+      "id": "virtual_account",
+      "label": "Virtual Account Number (bank transfer)",
+      "details": "Each DHL customer has a unique Virtual Account Number tied to their DHL account. Transfer the exact invoice amount to that VAN via NEFT or RTGS — DHL's bank auto-reconciles the payment to this account number. The VAN can be shared by the collections desk if the customer does not have it."
+    }
+  ],
+  "proof_of_payment_email": "yogesh.jhamb@dhl.com",
+  "monthly_collection_target_day": 25,
+  "promise_date_max_business_days": 2,
+  "dispositions": [
+    "refusal",
+    "reason",
+    "promise-to-pay",
+    "dispute",
+    "escalation"
+  ],
+  "customers": {
+    "DHL001": {
+      "account_number": "DHL001",
+      "company_name": "Mind Your Business Inc.",
+      "contact_name": "Mr Anthony Gressive",
+      "alternate_contact_name": "Mrs Anna Gressive",
+      "registered_email": "finance@mindyourbusiness.example",
+      "phone": "9813640644",
+      "billing_city": "Mumbai",
+      "language_preferences": [
+        "English",
+        "Hinglish"
+      ],
+      "payment_terms": "30 days",
+      "collection_notes": [
+        "Outbound collections scenario for DHL Express India POC.",
+        "All previously logged disputes have been resolved and credit notes issued, but no payment has been received yet.",
+        "If Mr Anthony Gressive is unavailable, ask for Mrs Anna Gressive on the same line.",
+        "Soft monthly target: try to secure payment before the 25th of the month."
+      ],
+      "human_transfer": {
+        "name": "Ms Sanorita",
+        "designation": "Collections Executive",
+        "phone": "09416340644"
+      }
+    }
+  },
+  "invoices": {
+    "DHL001": [
+      {
+        "invoice_no": "DHL123456",
+        "invoice_type": "Duty Import",
+        "amount": 13600,
+        "currency": "INR",
+        "invoice_date": "2026-01-01",
+        "due_date": "2026-01-31",
+        "overdue_days": 60,
+        "history": [
+          "Customer earlier raised a price-list vs invoice mismatch on 1 waybill.",
+          "Issue resolved; credit note issued.",
+          "No further open dispute on this invoice — payment is simply pending."
+        ]
+      },
+      {
+        "invoice_no": "DHL654321",
+        "invoice_type": "Freight Export",
+        "amount": 34650,
+        "currency": "INR",
+        "invoice_date": "2026-02-01",
+        "due_date": "2026-02-22",
+        "overdue_days": 45,
+        "history": [
+          "Customer logged an issue for 2 delayed shipments.",
+          "Issue resolved; credit note issued some time ago.",
+          "Week after the credit note, DHL called the customer; customer confirmed receipt of the credit note.",
+          "No further open dispute — payment is pending."
+        ]
+      },
+      {
+        "invoice_no": "DHL332241",
+        "invoice_type": "Freight Import",
+        "amount": 9670,
+        "currency": "INR",
+        "invoice_date": "2026-03-01",
+        "due_date": "2026-04-07",
+        "overdue_days": 30,
+        "history": [
+          "No prior dispute logged. Standard freight import invoice, simply unpaid past the due date."
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: dhl-poc
+    runtime: docker
+    plan: free
+    region: singapore
+    autoDeployTrigger: commit
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BASE_URL
+        value: https://api.openai.com/v1
+      - key: OPENAI_REALTIME_MODEL
+        value: gpt-realtime-mini
+      - key: OPENAI_SUPERVISOR_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_LANGUAGE_COACH_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_CHAT_MODEL
+        value: gpt-4.1
+      - key: OPENAI_REALTIME_TRANSCRIPTION_MODEL
+        value: gpt-4o-mini-transcribe
+      - key: OPENAI_REALTIME_VOICE
+        value: marin
+      - key: DEMO_ACCOUNT_ID
+        value: DHL001
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: RENDER_EXTERNAL_URL
+        sync: false

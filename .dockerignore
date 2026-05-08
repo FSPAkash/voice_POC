@@ -1,0 +1,15 @@
+.claude
+.git
+.gitignore
+APPLE_DESIGN
+Provisional_Requirement_Document_Apar.pdf
+
+backend/__pycache__
+backend/scripts/__pycache__
+frontend/dist
+frontend/node_modules
+
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
