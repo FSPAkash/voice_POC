@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import './App.css'
 import App from './App.tsx'
 import { Login, getStoredUser, clearStoredUser } from './components/Login'
 

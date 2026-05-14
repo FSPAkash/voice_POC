@@ -1,25 +1,25 @@
 {
   "agent": {
     "model": "gpt-realtime-mini",
-    "events": 5,
+    "events": 0,
     "response_usage": {
-      "text_input_tokens": 1209,
-      "text_cached_input_tokens": 512,
-      "text_output_tokens": 460,
-      "audio_input_tokens": 1887,
+      "text_input_tokens": 0,
+      "text_cached_input_tokens": 0,
+      "text_output_tokens": 0,
+      "audio_input_tokens": 0,
       "audio_cached_input_tokens": 0,
-      "audio_output_tokens": 1697,
-      "estimated_cost_usd": 0.054671
+      "audio_output_tokens": 0,
+      "estimated_cost_usd": 0.0
     },
     "transcription_usage": {
       "model": "gpt-4o-mini-transcribe",
-      "audio_input_tokens": 237,
-      "text_input_tokens": 136,
-      "text_output_tokens": 82,
-      "estimated_cost_usd": 0.000876
+      "audio_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "estimated_cost_usd": 0.0
     },
-    "total_tokens": 6220,
-    "estimated_cost_usd": 0.055547
+    "total_tokens": 0,
+    "estimated_cost_usd": 0.0
   },
   "supervisor": {
     "model": "deterministic-supervisor",
@@ -41,13 +41,13 @@
   },
   "chat_agent": {
     "model": "gpt-4.1",
-    "events": 8,
+    "events": 3,
     "text_input_tokens": 0,
     "text_cached_input_tokens": 0,
     "text_output_tokens": 0,
     "total_tokens": 0,
     "estimated_cost_usd": 0.0
   },
-  "updated_at": "2026-05-14T06:06:31.124926+00:00",
+  "updated_at": "2026-05-14T09:30:01.000373+00:00",
   "price_table_version": "openai-pricing-2026-05-07"
 }

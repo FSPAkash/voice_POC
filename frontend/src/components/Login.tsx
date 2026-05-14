@@ -56,7 +56,11 @@ export function Login({ onAuthenticated }: Props) {
     <div className="login-shell">
       <div className="login-card">
         <div className="login-logos">
-          <img src="/logos/FSSML.png" alt="FS" className="login-logo-mark" />
+          <div className="brand-lockup" aria-label="DHL | Findability Sciences">
+            <img className="brand-lockup__logo brand-lockup__logo--dhl" src="/logos/DHL.png" alt="DHL" />
+            <span className="brand-lockup__x" aria-hidden>|</span>
+            <img className="brand-lockup__logo brand-lockup__logo--fs" src="/logos/FSSML.png" alt="Findability Sciences" />
+          </div>
         </div>
         <h1 className="login-title">Voice AI POC</h1>
         <p className="login-sub">Sign in to continue</p>

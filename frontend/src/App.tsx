@@ -76,8 +76,8 @@ type AgentActivityEntry = {
 const AGENT_NODES: { id: AgentActivityEntry['agent']; label: string; model: string; idle: string }[] = [
   { id: 'caller', label: 'Live Caller', model: 'gpt-realtime', idle: 'Idle — voice mode only' },
   { id: 'chat_agent', label: 'Chat Agent', model: 'gpt-4.1-mini', idle: 'Idle — text mode only' },
-  { id: 'language_coach', label: 'Language Coach', model: 'gpt-4.1-mini', idle: 'Awaiting customer turn' },
-  { id: 'supervisor', label: 'Supervisor', model: 'gpt-4.1-mini', idle: 'Awaiting agent turn' },
+  { id: 'language_coach', label: 'Language Coach', model: 'rule-based', idle: 'Awaiting customer turn' },
+  { id: 'supervisor', label: 'Supervisor', model: 'rule-based', idle: 'Awaiting agent turn' },
   { id: 'tool', label: 'Tool Layer', model: 'mock SAP', idle: 'No tool calls yet' },
   { id: 'summarizer', label: 'Summariser', model: 'gpt-4.1-mini', idle: 'Runs on call wrap-up' },
 ]
@@ -307,12 +307,33 @@ export default function App({ username, onLogout }: AppProps = {}) {
     }
   }, [callHistory])
   const [mode, setMode] = useState<InteractionMode>('voice')
+  const [headless, setHeadless] = useState<boolean>(false)
+  const [muted, setMuted] = useState(false)
+  const [ambienceGain, setAmbienceGain] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0.4
+    try {
+      const raw = window.localStorage.getItem('dhl_ambience_gain_v1')
+      const parsed = raw ? Number(raw) : NaN
+      return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : 0.4
+    } catch {
+      return 0.4
+    }
+  })
+  const [headlessNotices, setHeadlessNotices] = useState<{ id: string; text: string }[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
   const [agentActivity, setAgentActivity] = useState<AgentActivityEntry[]>([])
   const [openInfo, setOpenInfo] = useState<'account' | 'language' | 'invoices' | 'tools' | null>(
     null,
   )
+
+  useEffect(() => {
+    if (headlessNotices.length === 0) return
+    const id = window.setTimeout(() => {
+      setHeadlessNotices((previous) => previous.slice(1))
+    }, 4000)
+    return () => window.clearTimeout(id)
+  }, [headlessNotices])
 
   const deferredTranscript = useDeferredValue(transcript)
 
@@ -411,6 +432,60 @@ export default function App({ username, onLogout }: AppProps = {}) {
     }, 500)
     return () => window.clearInterval(id)
   }, [callState])
+
+  useEffect(() => {
+    const stream = localStreamRef.current
+    if (!stream) return
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = !muted
+    })
+  }, [muted])
+
+  const ambienceRef = useRef<HTMLAudioElement | null>(null)
+  const ambienceFadeRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const audio = ambienceRef.current
+    if (!audio) return
+    const isOnCall = callState === 'connected' || callState === 'starting'
+    const baseGain = Math.max(0, Math.min(1, ambienceGain))
+    const targetVolume = !isOnCall || muted ? 0 : thinking || customerSpeaking ? baseGain : baseGain * 0.5
+
+    if (isOnCall && audio.paused) {
+      audio.play().catch((err) => console.warn('[ambience] resume failed', err))
+    }
+
+    if (ambienceFadeRef.current !== null) {
+      window.clearInterval(ambienceFadeRef.current)
+    }
+    const step = 0.025
+    ambienceFadeRef.current = window.setInterval(() => {
+      const current = audio.volume
+      if (Math.abs(current - targetVolume) < step) {
+        audio.volume = targetVolume
+        if (ambienceFadeRef.current !== null) {
+          window.clearInterval(ambienceFadeRef.current)
+          ambienceFadeRef.current = null
+        }
+        if (!isOnCall && targetVolume === 0 && !audio.paused) {
+          audio.pause()
+        }
+        return
+      }
+      audio.volume = current < targetVolume
+        ? Math.min(targetVolume, current + step)
+        : Math.max(targetVolume, current - step)
+    }, 50)
+  }, [callState, thinking, customerSpeaking, muted, ambienceGain])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('dhl_ambience_gain_v1', String(ambienceGain))
+    } catch {
+      // storage unavailable — ignore
+    }
+  }, [ambienceGain])
+
 
   const getCallStateLabel = () => {
     switch (callState) {
@@ -627,6 +702,13 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const appendSystemTranscript = (text: string) => {
     const normalized = text.trim()
     if (!normalized) return
+
+    if (headless) {
+      setHeadlessNotices((previous) => [
+        ...previous.slice(-2),
+        { id: `notice_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, text: normalized },
+      ])
+    }
 
     startTransition(() => {
       setTranscript((previous) => [
@@ -1390,12 +1472,24 @@ export default function App({ username, onLogout }: AppProps = {}) {
     resetAssistantDraft()
     setCustomerSpeaking(false)
     setThinking(false)
+    setMuted(false)
+    setHeadlessNotices([])
     coachingHintsRef.current = []
   }
 
   const startCall = async () => {
     const snapshot = bootstrapRef.current
     if (!snapshot || callStateRef.current !== 'ready') return
+
+    // Prime ambience inside the user-gesture tick so autoplay is allowed.
+    const ambience = ambienceRef.current
+    if (ambience) {
+      ambience.volume = 0
+      ambience.muted = false
+      ambience.play().catch(() => {
+        // autoplay blocked — fade effect will retry on next state change
+      })
+    }
 
     setCallState('starting')
     setErrorMessage('')
@@ -1581,6 +1675,14 @@ export default function App({ username, onLogout }: AppProps = {}) {
       }
 
       const snap = finalCosts ?? costs
+      const modeCostUsd =
+        mode === 'voice'
+          ? snap.agent.estimated_cost_usd
+          : snap.chat_agent?.estimated_cost_usd ?? 0
+      const modeTokens =
+        mode === 'voice'
+          ? snap.agent.total_tokens
+          : snap.chat_agent?.total_tokens ?? 0
       const record: CallRecord = {
         id: `call_${endedAt}`,
         startedAt,
@@ -1588,8 +1690,8 @@ export default function App({ username, onLogout }: AppProps = {}) {
         durationSec: Math.max(0, Math.round((endedAt - startedAt) / 1000)),
         mode,
         disposition: dispositionRef.current,
-        costUsd: snap.combined.estimated_cost_usd,
-        totalTokens: snap.combined.total_tokens,
+        costUsd: modeCostUsd,
+        totalTokens: modeTokens,
         summary,
       }
       setCallHistory((prev) => [record, ...prev])
@@ -1745,13 +1847,17 @@ export default function App({ username, onLogout }: AppProps = {}) {
   return (
     <div className="app">
       <audio autoPlay className="remote-audio" ref={remoteAudioRef} />
+      <audio loop preload="auto" ref={ambienceRef} src="/sound/call_center_background.wav" />
 
       <header className="topbar">
         <div className="topbar__brand">
-          <img className="topbar__logo" src="/logos/FSSML.png" alt="Findability Sciences" />
+          <div className="brand-lockup" aria-label="DHL | Findability Sciences">
+            <img className="brand-lockup__logo brand-lockup__logo--dhl" src="/logos/DHL.png" alt="DHL" />
+            <span className="brand-lockup__x" aria-hidden>|</span>
+            <img className="brand-lockup__logo brand-lockup__logo--fs" src="/logos/FSSML.png" alt="Findability Sciences" />
+          </div>
           <div>
             <div className="topbar__title">Collections Voice POC</div>
-            <div className="topbar__sub">Powered by Findability Sciences</div>
           </div>
         </div>
 
@@ -1844,6 +1950,30 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   </select>
                 </label>
               ) : null}
+              {mode === 'voice' ? (
+                <label className="headless-toggle" title="Hide live transcript and show a phone-call view. Quality coaching still runs in background; full transcript appears in Wrap-Up.">
+                  <input
+                    type="checkbox"
+                    checked={headless}
+                    onChange={(event) => setHeadless(event.target.checked)}
+                  />
+                  <span>Headless</span>
+                </label>
+              ) : null}
+              {mode === 'voice' ? (
+                <label className="ambience-slider" title="Background call-center ambience volume (does not affect agent voice).">
+                  <span>Ambience</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={ambienceGain}
+                    onChange={(event) => setAmbienceGain(Number(event.target.value))}
+                  />
+                  <span className="ambience-slider__value">{Math.round(ambienceGain * 100)}%</span>
+                </label>
+              ) : null}
               <div className="stage__toolbar-spacer" />
               {mode === 'voice' ? (
                 <>
@@ -1885,7 +2015,118 @@ export default function App({ username, onLogout }: AppProps = {}) {
                 </>
               )}
             </div>
-            {mode === 'voice' ? (
+            {mode === 'voice' && headless ? (
+              <div className={`phone phone--popup phone--${stageTone}`} role="dialog" aria-label="Voice call">
+                <div
+                  className="phone__backdrop"
+                  aria-hidden
+                  onClick={() => setHeadless(false)}
+                />
+                <div className="phone__frame">
+                  <div className="phone__notch" />
+                  <button
+                    type="button"
+                    className="phone__close"
+                    onClick={() => setHeadless(false)}
+                    aria-label="Exit headless view (call continues)"
+                    title="Exit headless view (call continues)"
+                  >
+                    ×
+                  </button>
+                  <div className="phone__screen">
+                    <div className="phone__status-row">
+                      <span>{isLive ? formatElapsed(elapsed) : 'INCOMING'}</span>
+                      <span className="phone__status-dot" />
+                      <span>{isLive ? disposition : 'DHL EXPRESS INDIA'}</span>
+                    </div>
+                    <div className={`phone__avatar phone__avatar--brand${customerSpeaking ? ' phone__avatar--talking' : ''}${thinking ? ' phone__avatar--thinking' : ''}`}>
+                      <div className="phone__avatar-ring" />
+                      <div className="phone__avatar-ring phone__avatar-ring--delay" />
+                      <div className="phone__avatar-core">
+                        <img src="/logos/DHL.png" alt="DHL" className="phone__avatar-img" />
+                      </div>
+                    </div>
+                    <div className="phone__caller">
+                      <div className="phone__name">DHL Express India</div>
+                      <div className="phone__sub">
+                        {callState === 'starting'
+                          ? 'Calling…'
+                          : callState === 'connected'
+                            ? customerSpeaking
+                              ? `${customer?.contact_name ?? 'You'} speaking…`
+                              : thinking
+                                ? 'Agent thinking…'
+                                : `On call · ${customer?.contact_name ?? 'Customer'}`
+                            : callState === 'ending'
+                              ? 'Wrapping up…'
+                              : `Incoming call for ${customer?.contact_name ?? 'customer'}`}
+                      </div>
+                    </div>
+                    <div className="phone__meter" aria-hidden>
+                      {Array.from({ length: meterBars }).map((_, i) => (
+                        <span
+                          key={i}
+                          className={`phone__bar${i < activeBars ? ' phone__bar--on' : ''}${
+                            thinking ? ' phone__bar--pulse' : ''
+                          }`}
+                        />
+                      ))}
+                    </div>
+                    <div className="phone__notices" aria-live="polite">
+                      {headlessNotices.map((notice) => (
+                        <div className="phone__notice" key={notice.id}>{notice.text}</div>
+                      ))}
+                    </div>
+                    <div className="phone__controls">
+                      {isLive || callState === 'starting' ? (
+                        <>
+                          <button
+                            type="button"
+                            className={`phone__btn phone__btn--mute${muted ? ' phone__btn--on' : ''}`}
+                            disabled={!isLive}
+                            onClick={() => setMuted((value) => !value)}
+                            aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
+                          >
+                            <span>{muted ? 'Unmute' : 'Mute'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="phone__btn phone__btn--end"
+                            disabled={!canEnd}
+                            onClick={() => void endCall()}
+                            aria-label="End call"
+                          >
+                            <span>End</span>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="phone__btn phone__btn--decline"
+                            disabled
+                            aria-label="Decline (preview only)"
+                            title="Preview UI — use Accept to start the simulated call"
+                          >
+                            <span>Decline</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="phone__btn phone__btn--accept"
+                            disabled={!canStart}
+                            onClick={() => void startCall()}
+                            aria-label="Accept call"
+                          >
+                            <span>Accept</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    <div className="phone__footer">{selectedRealtimeModelLabel}</div>
+                  </div>
+                </div>
+              </div>
+            ) : mode === 'voice' ? (
               <div className={`stage__hero stage__hero--compact stage__hero--${stageTone}`}>
                 <div className="stage__line">{getStageLine()}</div>
                 <div className="stage__meter stage__meter--slim" aria-hidden>
@@ -1928,6 +2169,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
               </div>
             )}
 
+            {mode === 'voice' && headless ? null : (
             <div className="transcript" ref={transcriptScrollRef}>
               {deferredTranscript.length === 0 ? (
                 <div className="transcript__empty">
@@ -1973,6 +2215,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                 </div>
               ) : null}
             </div>
+            )}
 
             {mode === 'chat' ? (
               <form
@@ -2012,6 +2255,37 @@ export default function App({ username, onLogout }: AppProps = {}) {
           </section>
 
           <aside className="side">
+            <div className="cost-strip cost-strip--side">
+              {mode === 'voice' ? (
+                <div className="cost-block">
+                  <div className="cost-block__head">
+                    <span>Live Caller (voice)</span>
+                    <small>{costs.agent.events > 0 ? costs.agent.model : selectedRealtimeModel}</small>
+                  </div>
+                  <div className="cost-block__value">{formatUsd(costs.agent.estimated_cost_usd)}</div>
+                  <div className="cost-block__meta">
+                    <span>{formatNumber(costs.agent.total_tokens)} tok</span>
+                    <span>· audio in {formatNumber(costs.agent.response_usage.audio_input_tokens)}</span>
+                    <span>· audio out {formatNumber(costs.agent.response_usage.audio_output_tokens)}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="cost-block">
+                  <div className="cost-block__head">
+                    <span>Chat Agent (text)</span>
+                    <small>{costs.chat_agent?.model ?? bootstrap?.config.chat_model ?? 'gpt-4.1-mini'}</small>
+                  </div>
+                  <div className="cost-block__value">
+                    {formatUsd(costs.chat_agent?.estimated_cost_usd ?? 0)}
+                  </div>
+                  <div className="cost-block__meta">
+                    <span>{formatNumber(costs.chat_agent?.total_tokens ?? 0)} tok</span>
+                    <span>· in {formatNumber(costs.chat_agent?.text_input_tokens ?? 0)}</span>
+                    <span>· out {formatNumber(costs.chat_agent?.text_output_tokens ?? 0)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="card agents-card">
               <div className="card__head">
                 <span className="card__eyebrow">Agent Stack</span>
@@ -2320,72 +2594,6 @@ export default function App({ username, onLogout }: AppProps = {}) {
             ) : null}
           </aside>
 
-          <footer className="cost-strip">
-            {mode === 'voice' ? (
-              <div className="cost-block">
-                <div className="cost-block__head">
-                  <span>Live Caller (voice)</span>
-                  <small>{costs.agent.events > 0 ? costs.agent.model : selectedRealtimeModel}</small>
-                </div>
-                <div className="cost-block__value">{formatUsd(costs.agent.estimated_cost_usd)}</div>
-                <div className="cost-block__meta">
-                  <span>{formatNumber(costs.agent.total_tokens)} tok</span>
-                  <span>· audio in {formatNumber(costs.agent.response_usage.audio_input_tokens)}</span>
-                  <span>· audio out {formatNumber(costs.agent.response_usage.audio_output_tokens)}</span>
-                </div>
-              </div>
-            ) : (
-              <div className="cost-block">
-                <div className="cost-block__head">
-                  <span>Chat Agent (text)</span>
-                  <small>{costs.chat_agent?.model ?? bootstrap?.config.chat_model ?? 'gpt-4.1-mini'}</small>
-                </div>
-                <div className="cost-block__value">
-                  {formatUsd(costs.chat_agent?.estimated_cost_usd ?? 0)}
-                </div>
-                <div className="cost-block__meta">
-                  <span>{formatNumber(costs.chat_agent?.total_tokens ?? 0)} tok</span>
-                  <span>· in {formatNumber(costs.chat_agent?.text_input_tokens ?? 0)}</span>
-                  <span>· out {formatNumber(costs.chat_agent?.text_output_tokens ?? 0)}</span>
-                </div>
-              </div>
-            )}
-            <div className="cost-block">
-              <div className="cost-block__head">
-                <span>Supervisor</span>
-                <small>{costs.supervisor.model}</small>
-              </div>
-              <div className="cost-block__value">{formatUsd(costs.supervisor.estimated_cost_usd)}</div>
-              <div className="cost-block__meta">
-                <span>{formatNumber(costs.supervisor.total_tokens)} tok</span>
-                <span>· in {formatNumber(costs.supervisor.text_input_tokens)}</span>
-                <span>· out {formatNumber(costs.supervisor.text_output_tokens)}</span>
-              </div>
-            </div>
-            <div className="cost-block">
-              <div className="cost-block__head">
-                <span>Language Coach</span>
-                <small>{costs.language_coach.model}</small>
-              </div>
-              <div className="cost-block__value">{formatUsd(costs.language_coach.estimated_cost_usd)}</div>
-              <div className="cost-block__meta">
-                <span>{formatNumber(costs.language_coach.total_tokens)} tok</span>
-                <span>Â· in {formatNumber(costs.language_coach.text_input_tokens)}</span>
-                <span>Â· out {formatNumber(costs.language_coach.text_output_tokens)}</span>
-              </div>
-            </div>
-            <div className="cost-block cost-block--combined">
-              <div className="cost-block__head">
-                <span>Combined</span>
-                <small>estimated</small>
-              </div>
-              <div className="cost-block__value">{formatUsd(costs.combined.estimated_cost_usd)}</div>
-              <div className="cost-block__meta">
-                <span>{formatNumber(costs.combined.total_tokens)} tokens</span>
-                <span>· {bootstrap?.config.transcription_model ?? 'gpt-4o-mini-transcribe'} for ASR</span>
-              </div>
-            </div>
-          </footer>
         </main>
       ) : activeTab === 'wrap' ? (
         <WrapUpView history={callHistory} />
@@ -2433,10 +2641,14 @@ function WrapUpView({ history }: { history: CallRecord[] }) {
             <li className="wrap-card" key={rec.id}>
               <div className="wrap-card__head">
                 <div className="wrap-card__meta">
-                  <strong>{rec.summary?.headline ?? '(no summary)'}</strong>
+                  <strong>
+                    <span className={`wrap-card__mode wrap-card__mode--${rec.mode}`}>
+                      {rec.mode === 'voice' ? 'Voice' : 'Chat'}
+                    </span>
+                    {rec.summary?.headline ?? '(no summary)'}
+                  </strong>
                   <span>
-                    {new Date(rec.startedAt).toLocaleTimeString()} · {rec.mode} ·{' '}
-                    {rec.disposition}
+                    {new Date(rec.startedAt).toLocaleTimeString()} · {rec.disposition}
                   </span>
                 </div>
                 <div className="wrap-card__metrics">
