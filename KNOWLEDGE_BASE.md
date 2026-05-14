@@ -152,6 +152,7 @@ DHL provided a concrete simulation the vendor's agent must demonstrate against.
 - **Company:** Mind Your Business Inc.
 - **Contact persons:** Mr. Anthony Gressive **or** Mrs. Anna Gressive.
 - **Direct phone:** 9813640644.
+- **Registered email on file:** `Anthony@mybiz.com` (single source of truth for invoice resends and proof-of-payment correspondence with this customer).
 
 ### 8.2 Outstanding invoices
 
@@ -198,6 +199,9 @@ For **instalments, disputes, or refund queries** — take notes, and **connect t
 
 ## 9. Payment Collection Call Flow (Section 7)
 
+### 9.0 Agent identity (fixed for this PoC)
+The voice agent is **always male**, name **Yogesh**, calling on behalf of DHL Express India. All scripts below, in every language, must use masculine self-reference (e.g. Hindi/Hinglish "main … kar raha hoon", not "kar rahi hoon"). The realtime voice configured in the backend must map to a male voice persona named Yogesh; the deterministic fallback templates must also speak as Yogesh.
+
 ### 9.1 First-time reminder template (unpaid, due date passed)
 
 **Opening identity check:**
@@ -208,7 +212,7 @@ For **instalments, disputes, or refund queries** — take notes, and **connect t
 | Customer reply | Agent action |
 |---|---|
 | **No / wrong person** | "Could you please connect me to the person handling accounts payable or payments for your company?" |
-| **Concern person on leave** | "I would appreciate if you can connect me with an alternate person in absence of [Mangesh] because I see there are several outstanding invoices in your DHL account due to which the account's credit-worthiness may get impacted." |
+| **Concern person on leave** | "I would appreciate if you can connect me with an alternate person in absence of [Anthony] because I see there are several outstanding invoices in your DHL account due to which the account's credit-worthiness may get impacted." |
 | **Yes / correct person** | Greet + introduce → state purpose. |
 
 **Standard introduction (correct person):**

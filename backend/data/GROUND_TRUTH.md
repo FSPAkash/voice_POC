@@ -24,7 +24,7 @@
 | Primary contact | `Mr Anthony Gressive` |
 | Alternate contact | `Mrs Anna Gressive` |
 | Direct phone | `9813640644` |
-| Registered email | `finance@mindyourbusiness.example` |
+| Registered email | `Anthony@mybiz.com` |
 | Billing city | `Mumbai` |
 | Payment terms | `30 days` |
 | Language preferences | `English`, `Hinglish` |

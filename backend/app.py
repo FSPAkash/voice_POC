@@ -38,7 +38,7 @@ REALTIME_TRANSCRIPTION_MODEL = os.environ.get(
     "OPENAI_REALTIME_TRANSCRIPTION_MODEL",
     "gpt-4o-mini-transcribe",
 )
-DEFAULT_REALTIME_VOICE = os.environ.get("OPENAI_REALTIME_VOICE", "marin")
+DEFAULT_REALTIME_VOICE = os.environ.get("OPENAI_REALTIME_VOICE", "cedar")
 
 # Voice -> agent persona. The realtime API picks the voice; the prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
@@ -54,7 +54,7 @@ VOICE_PERSONAS: dict[str, dict[str, str]] = {
     "verse": {"name": "Arjun", "gender": "male", "pronouns": "he/him"},
     "alloy": {"name": "Aarav", "gender": "neutral", "pronouns": "they/them"},
 }
-DEFAULT_PERSONA = {"name": "Priya", "gender": "female", "pronouns": "she/her"}
+DEFAULT_PERSONA = {"name": "Yogesh", "gender": "male", "pronouns": "he/him"}
 SUPPORTED_REALTIME_MODELS = [
     {"id": "gpt-realtime-mini", "label": "GPT Realtime Mini"},
     {"id": "gpt-realtime", "label": "GPT Realtime"},
@@ -303,12 +303,12 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "log_dispute",
-        "description": "Open a dispute ticket for an invoice and capture notes.",
+        "description": "Open a dispute ticket for an invoice and capture notes. The `reason` field MUST contain the customer's specific dispute language verbatim (e.g. 'charges are too high', 'wrong weight billed') — never a generic placeholder like 'dispute raised' or 'customer disputes invoice'. If the customer disputes multiple invoices, call log_dispute once per disputed invoice_no with the same reason text.",
         "parameters": {
             "type": "object",
             "properties": {
                 "invoice_no": {"type": "string"},
-                "reason": {"type": "string"},
+                "reason": {"type": "string", "description": "Customer's dispute language quoted verbatim from the transcript. Must not be empty or generic."},
                 "undisputed_amount": {"type": "number"},
             },
             "required": ["invoice_no", "reason"],
@@ -462,8 +462,8 @@ def build_persona_block(voice: str | None) -> str:
             "- This rule applies ONLY when you are actually speaking Hindi, Hinglish, Marathi, Punjabi, Gujarati or any "
             "language with gendered verb conjugation. It does NOT mean you should default to Hindi/Hinglish — language "
             "choice is governed by the # Language behaviour section and the per-turn language coach nudge.\n"
-            "- When speaking such a language, you MUST use FEMININE verb forms for yourself. Examples: \"main kar rahi hoon\" "
-            "(not \"kar raha hoon\"), \"main bol rahi hoon\", \"main madad karungi\" (not \"karunga\"). Never mix masculine "
+            "- When speaking such a language, you MUST use FEMININE verb forms for yourself. Examples: \"main kar raha hoon\" "
+            "(not \"kar raha hoon\"), \"main bol raha hoon\", \"main madad karungi\" (not \"karunga\"). Never mix masculine "
             "and feminine forms inside a single turn.\n"
             "- In English, refer to yourself with she/her if needed.\n"
         )
@@ -473,7 +473,7 @@ def build_persona_block(voice: str | None) -> str:
             "language with gendered verb conjugation. It does NOT mean you should default to Hindi/Hinglish — language "
             "choice is governed by the # Language behaviour section and the per-turn language coach nudge.\n"
             "- When speaking such a language, you MUST use MASCULINE verb forms for yourself. Examples: \"main kar raha hoon\" "
-            "(not \"kar rahi hoon\"), \"main bol raha hoon\", \"main madad karunga\" (not \"karungi\"). Never mix.\n"
+            "(not \"kar raha hoon\"), \"main bol raha hoon\", \"main madad karunga\" (not \"karungi\"). Never mix.\n"
             "- In English, refer to yourself with he/him if needed.\n"
         )
     else:
@@ -1018,7 +1018,7 @@ def total_summary_text(customer: dict[str, Any], invoices: list[dict[str, Any]],
         )
     if language_id == "hindi":
         return (
-            f"Main isliye call kar rahi hoon kyunki {company} ke DHL account par total {total} ka outstanding hai "
+            f"Main isliye call kar raha hoon kyunki {company} ke DHL account par total {total} ka outstanding hai "
             f"aur {len(invoices)} invoices overdue hain."
         )
     if language_id == "bengali":
@@ -1039,16 +1039,16 @@ def opening_purpose_text(customer: dict[str, Any], invoices: list[dict[str, Any]
     invoice_text = invoice_summary_line(target_invoice, language_id) if target_invoice else ""
     if language_id == "hinglish":
         return (
-            f"Thank you for confirming. Main DHL Express India se aapke credit account ke regarding call kar rahi hoon. "
+            f"Thank you for confirming. Mera naam Yogesh hai, main DHL Express India se aapke credit account ke regarding call kar raha hoon. "
             f"{total_text} {invoice_text} Kya aap bata sakte hain ki payment ab tak kyon nahin hui?"
         ).strip()
     if language_id == "bengali":
         return (
-            f"Dhonnobad confirm korar jonno. Ami DHL Express India theke apnar credit account niye call korchi. "
+            f"Dhonnobad confirm korar jonno. Amar naam Yogesh, ami DHL Express India theke apnar credit account niye call korchi. "
             f"{total_text} {invoice_text} Payment ekhono keno hoyni, bolben?"
         ).strip()
     return (
-        f"Thank you for confirming. I am calling from DHL Express India regarding your credit account. "
+        f"Thank you for confirming. My name is Yogesh and I am calling from DHL Express India regarding your credit account. "
         f"{total_text} {invoice_text} Could you please help me understand why the payment has not been made yet?"
     ).strip()
 
@@ -1239,11 +1239,11 @@ def generate_collections_reply(
     if count_entries(entries, "assistant") == 0:
         contact = customer_display_name(customer) or "the accounts payable contact"
         if language_id == "hinglish":
-            text = f"Good day, main DHL Express India se bol rahi hoon. Kya main {contact} se baat kar rahi hoon?"
+            text = f"Good day, mera naam Yogesh hai aur main DHL Express India se bol raha hoon. Kya main {contact} se baat kar raha hoon?"
         elif language_id == "bengali":
-            text = f"Good day, ami DHL Express India theke bolchi. Ami ki {contact}-er sathe kotha bolchi?"
+            text = f"Good day, amar naam Yogesh, ami DHL Express India theke bolchi. Ami ki {contact}-er sathe kotha bolchi?"
         else:
-            text = f"Good day, this is DHL Express India calling. Am I speaking with {contact}?"
+            text = f"Good day, my name is Yogesh and I am calling from DHL Express India. Am I speaking with {contact}?"
         return (text, tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if signals["safety"]:
@@ -1256,7 +1256,7 @@ def generate_collections_reply(
         if language_id == "hinglish":
             return (
                 "Mujhe bahut afsos hai yeh sun kar. Aapki safety sabse important hai, "
-                "isliye main abhi is call ko turant human team ko escalate kar rahi hoon.",
+                "isliye main abhi is call ko turant human team ko escalate kar raha hoon.",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1299,7 +1299,7 @@ def generate_collections_reply(
             (
                 "That is why I am calling today, and I would like to understand why payment has not been made yet."
                 if language_id == "english"
-                else "Isi wajah se main aaj call kar rahi hoon, aur samajhna chahti hoon ki payment ab tak kyon nahin hui."
+                else "Isi wajah se main aaj call kar raha hoon, aur samajhna chahta hoon ki payment ab tak kyon nahin hui."
             ),
         ]
         return (" ".join(part for part in parts if part), tool_calls, DETERMINISTIC_CHAT_MODEL)
@@ -1310,7 +1310,7 @@ def generate_collections_reply(
         ask = (
             "With those issues resolved, may I ask what is holding the payment back now?"
             if language_id == "english"
-            else "Ab jab yeh issues resolve ho chuke hain, kya main pooch sakti hoon ki payment ab tak kyon hold hai?"
+            else "Ab jab yeh issues resolve ho chuke hain, kya main pooch sakta hoon ki payment ab tak kyon hold hai?"
         )
         return (f"{text} {ask}", tool_calls, DETERMINISTIC_CHAT_MODEL)
 
@@ -1319,7 +1319,7 @@ def generate_collections_reply(
         line = invoice_summary_line(target_invoice, language_id) if target_invoice else ""
         if language_id == "hinglish":
             return (
-                f"Theek hai, ek-ek karke batati hoon. {line} Kya is invoice ke liye payment date confirm kar sakte hain?",
+                f"Theek hai, ek-ek karke batata hoon. {line} Kya is invoice ke liye payment date confirm kar sakte hain?",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1342,7 +1342,7 @@ def generate_collections_reply(
     if signals["repeat_request"]:
         if language_id == "hinglish":
             return (
-                "Maaf kijiye. Main dheere se dohra deti hoon. " + total_summary_text(customer, invoices, language_id),
+                "Maaf kijiye. Main dheere se dohra deta hoon. " + total_summary_text(customer, invoices, language_id),
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1370,7 +1370,7 @@ def generate_collections_reply(
         if language_id == "hinglish":
             return (
                 "Discount approve karne ka authority mere paas nahin hai. "
-                "Lekin agar aap payment date confirm kar dein, toh main usko note kar sakti hoon. "
+                "Lekin agar aap payment date confirm kar dein, toh main usko note kar sakta hoon. "
                 "Kya aap specific date share karenge?",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
@@ -1496,7 +1496,7 @@ def generate_collections_reply(
     if signals["cash_flow"]:
         if language_id == "hinglish":
             return (
-                "Samajh sakti hoon ki cash flow tight ho sakta hai. "
+                "Samajh sakta hoon ki cash flow tight ho sakta hai. "
                 "Kya aap partial payment abhi kar sakte hain, ya full payment ke liye ek specific date confirm kar sakte hain?"
             , tool_calls, DETERMINISTIC_CHAT_MODEL)
         return (
@@ -1526,8 +1526,8 @@ def generate_collections_reply(
         tool_calls.append(build_tool_call_entry("transfer_to_human", args, result))
         if language_id == "hinglish":
             return (
-                "Main aapki position note kar rahi hoon. Payment abhi bhi overdue hai, "
-                "isliye main is case ko human collections executive ko follow-up ke liye transfer kar rahi hoon."
+                "Main aapki position note kar raha hoon. Payment abhi bhi overdue hai, "
+                "isliye main is case ko human collections executive ko follow-up ke liye transfer kar raha hoon."
             , tool_calls, DETERMINISTIC_CHAT_MODEL)
         return (
             "I respect your position. The payment remains overdue, so I am transferring this case to a human collections executive for follow-up.",
@@ -1718,12 +1718,46 @@ def deterministic_call_summary(payload: dict[str, Any]) -> dict[str, Any]:
     if latest_tool_call(tool_calls, "log_already_paid"):
         agreements.append("Customer said the payment has already been made.")
         follow_ups.append("Collections team should verify the proof of payment.")
-    if latest_tool_call(tool_calls, "log_dispute"):
-        key_decisions.append("A billing dispute was logged for follow-up by the concerned team.")
-        follow_ups.append("Concerned team should review and resolve the logged dispute.")
-    if latest_tool_call(tool_calls, "transfer_to_human"):
+    dispute_calls = [tc for tc in tool_calls if isinstance(tc, dict) and tc.get("name") == "log_dispute"]
+    if dispute_calls:
+        reasons_seen: list[str] = []
+        invoices_seen: list[str] = []
+        dispute_ids: list[str] = []
+        for dc in dispute_calls:
+            args = dc.get("args") or {}
+            result = dc.get("result") or {}
+            reason = normalize_whitespace(str(args.get("reason") or result.get("reason") or "")).strip()
+            invoice_no = str(args.get("invoice_no") or result.get("invoice_no") or "").strip()
+            dispute_id = str(result.get("dispute_id") or "").strip()
+            if reason and reason not in reasons_seen:
+                reasons_seen.append(reason)
+            if invoice_no and invoice_no not in invoices_seen:
+                invoices_seen.append(invoice_no)
+            if dispute_id and dispute_id not in dispute_ids:
+                dispute_ids.append(dispute_id)
+        reason_text = "; ".join(reasons_seen) if reasons_seen else "no reason captured"
+        invoice_text = ", ".join(invoices_seen) if invoices_seen else "unspecified invoice"
+        id_text = f" [ids: {', '.join(dispute_ids)}]" if dispute_ids else ""
+        plural = "Disputes" if len(dispute_calls) > 1 else "Dispute"
+        key_decisions.append(
+            f"{plural} logged on {invoice_text} (customer reason: \"{reason_text}\"){id_text}."
+        )
+        agreements.append(f"Customer raised a dispute on {invoice_text}: \"{reason_text}\".")
+        follow_ups.append(
+            f"Concerned team should review and resolve the logged dispute on {invoice_text} (reason: \"{reason_text}\")."
+        )
+        risk_flags.append(f"Open dispute pending team review on {invoice_text}.")
+    transfer_call = latest_tool_call(tool_calls, "transfer_to_human")
+    if transfer_call:
+        transfer_reason = (
+            transfer_call.get("args", {}).get("reason")
+            or transfer_call.get("result", {}).get("reason")
+            or "no usable payment commitment captured"
+        )
         agent_commitments.append("Agent escalated the case to a human collections executive.")
+        key_decisions.append(f"Call escalated to human collections executive (reason: {transfer_reason}).")
         follow_ups.append("Human collections should continue the case with full context.")
+        risk_flags.append("Call required escalation to a human collections executive.")
 
     customer_mood = "unknown"
     sentiment = 0
@@ -2744,6 +2778,14 @@ def llm_collections_turn(
         except Exception:  # noqa: BLE001
             pass
 
+    latest_customer_text = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "customer":
+            latest_customer_text = (msg.get("text") or "").strip()
+            break
+    customer_with_ctx = dict(customer)
+    customer_with_ctx["__latest_customer_text"] = latest_customer_text
+
     executed: list[dict[str, Any]] = []
     if isinstance(raw_tool_calls, list):
         for call in raw_tool_calls:
@@ -2753,7 +2795,7 @@ def llm_collections_turn(
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
             if name not in LLM_TURN_TOOLS:
                 continue
-            args = validate_tool_args(name, args, account_number, invoices, customer, constants)
+            args = validate_tool_args(name, args, account_number, invoices, customer_with_ctx, constants)
             if args is None:
                 continue
             result = run_tool(name, args)
@@ -2893,6 +2935,16 @@ def validate_tool_args(
             args["invoice_no"] = invoices[0].get("invoice_no") if invoices else None
         if name == "resend_invoice":
             args.setdefault("email", customer.get("registered_email"))
+        if name == "log_dispute":
+            reason_raw = str(args.get("reason") or "").strip()
+            generic = {
+                "", "dispute raised", "dispute", "customer disputes invoice",
+                "customer raised a dispute", "billing dispute", "n/a", "none",
+            }
+            if reason_raw.lower() in generic:
+                fallback = customer.get("__latest_customer_text") if isinstance(customer, dict) else None
+                if fallback:
+                    args["reason"] = str(fallback).strip()
         return args
 
     if name == "update_contact":

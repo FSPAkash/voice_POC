@@ -14,7 +14,10 @@
       "Bash(python -c \"import app; print\\('Import ok'\\)\")",
       "Bash(cd ../frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json)",
       "Read(//c/Users/AkashPatil/**)",
-      "Bash(python -c \"import app; print\\('ok'\\); print\\('CHAT_MODEL =', app.CHAT_MODEL\\)\")"
+      "Bash(python -c \"import app; print\\('ok'\\); print\\('CHAT_MODEL =', app.CHAT_MODEL\\)\")",
+      "Bash(python -c \"import openpyxl; print\\(openpyxl.__version__\\)\")",
+      "Bash(python backend/scripts/export_ground_truth_xlsx.py)",
+      "Bash(python backend/scripts/generate_ground_truth.py)"
     ]
   }
 }
