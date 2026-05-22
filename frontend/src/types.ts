@@ -98,6 +98,7 @@ export type AgentCostState = {
   transcription_usage: {
     model: string
     audio_input_tokens: number
+    text_input_tokens: number
     text_output_tokens: number
     estimated_cost_usd: number
   }
@@ -145,6 +146,7 @@ export type CostState = {
     estimated_cost_usd: number
   }
   updated_at: string
+  session_id: string
   price_table_version: string
   price_table: Record<string, Record<string, number>>
 }

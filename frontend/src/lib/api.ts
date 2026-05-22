@@ -100,6 +100,8 @@ export function resetCostLedger(body?: { model?: string; transcription_model?: s
 }
 
 export function recordCostEvent(body: {
+  event_id: string
+  session_id: string
   source: 'agent' | 'supervisor' | 'language_coach'
   usage_type: 'response' | 'transcription'
   model: string

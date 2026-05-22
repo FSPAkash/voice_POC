@@ -117,14 +117,14 @@ DEFAULT_PRICE_TABLE = {
         "audio_cached_input_per_million": 2.5,
         "audio_output_per_million": 80.0,
     },
-    # gpt-4o-transcribe is billed per audio token; text input/output are negligible.
+    # ASR models bill audio input separately from prompt text and transcript output.
     "gpt-4o-transcribe": {
-        "audio_input_per_million": 2.5,
+        "audio_input_per_million": 6.0,
         "text_input_per_million": 2.5,
         "text_output_per_million": 10.0,
     },
     "gpt-4o-mini-transcribe": {
-        "audio_input_per_million": 1.25,
+        "audio_input_per_million": 3.0,
         "text_input_per_million": 1.25,
         "text_output_per_million": 5.0,
     },
@@ -876,6 +876,7 @@ RENDERABLE_LANGUAGE_IDS = {"english", "hinglish", "hindi", "bengali"}
 DETERMINISTIC_CHAT_MODEL = "deterministic-call-engine"
 DETERMINISTIC_SUPERVISOR_MODEL = "deterministic-supervisor"
 DETERMINISTIC_LANGUAGE_COACH_MODEL = "deterministic-language-coach"
+MAX_PROCESSED_USAGE_EVENT_IDS = 4096
 REALTIME_RENDERER_INSTRUCTIONS = (
     "You are a voice renderer for a DHL collections application. "
     "Speak only the exact approved reply supplied by the application. "
@@ -1903,8 +1904,10 @@ def default_ledger(
         "supervisor": base_supervisor_ledger(),
         "language_coach": base_language_coach_ledger(),
         "chat_agent": base_chat_ledger(),
+        "processed_usage_event_ids": [],
+        "session_id": f"cost_session_{uuid.uuid4().hex[:12]}",
         "updated_at": utc_now_iso(),
-        "price_table_version": "openai-pricing-2026-05-07",
+        "price_table_version": "openai-pricing-2026-05-22",
     }
 
 
@@ -2214,17 +2217,41 @@ def load_board() -> dict[str, Any]:
     return load_json(BOARD_FILE, default_board())
 
 
+def merge_missing_defaults(target: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    for key, value in defaults.items():
+        if isinstance(value, dict):
+            current = target.get(key)
+            if not isinstance(current, dict):
+                target[key] = deepcopy(value)
+                continue
+            merge_missing_defaults(current, value)
+            continue
+        target.setdefault(key, deepcopy(value))
+    return target
+
+
 def load_ledger() -> dict[str, Any]:
     ledger = load_json(LEDGER_FILE, default_ledger())
-    if "agent" not in ledger:
-        ledger["agent"] = base_agent_ledger()
-    if "supervisor" not in ledger:
-        ledger["supervisor"] = base_supervisor_ledger()
-    if "language_coach" not in ledger:
-        ledger["language_coach"] = base_language_coach_ledger()
-    if "chat_agent" not in ledger:
-        ledger["chat_agent"] = base_chat_ledger()
-    return ledger
+    return merge_missing_defaults(ledger, default_ledger())
+
+
+def usage_event_already_recorded(ledger: dict[str, Any], event_id: str | None) -> bool:
+    normalized = str(event_id or "").strip()
+    if not normalized:
+        return False
+    return normalized in set(ledger.get("processed_usage_event_ids") or [])
+
+
+def remember_usage_event(ledger: dict[str, Any], event_id: str | None) -> None:
+    normalized = str(event_id or "").strip()
+    if not normalized:
+        return
+    processed = ledger.setdefault("processed_usage_event_ids", [])
+    if normalized in processed:
+        return
+    processed.append(normalized)
+    if len(processed) > MAX_PROCESSED_USAGE_EVENT_IDS:
+        del processed[:-MAX_PROCESSED_USAGE_EVENT_IDS]
 
 
 def save_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
@@ -2289,13 +2316,28 @@ def ledger_with_combined(ledger: dict[str, Any]) -> dict[str, Any]:
             "estimated_cost_usd": combined_cost,
         },
         "updated_at": ledger["updated_at"],
-        "price_table_version": ledger.get("price_table_version", "openai-pricing-2026-05-07"),
+        "session_id": ledger.get("session_id", ""),
+        "price_table_version": ledger.get("price_table_version", "openai-pricing-2026-05-22"),
         "price_table": PRICE_TABLE,
     }
 
 
-def record_agent_response_usage(model: str, usage: dict[str, Any]) -> dict[str, Any]:
+def record_agent_response_usage(
+    model: str,
+    usage: dict[str, Any],
+    event_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     ledger = load_ledger()
+    if session_id and session_id != ledger.get("session_id"):
+        debug_cost(
+            "agent.response stale-session skipped",
+            {"event_id": event_id, "event_session_id": session_id, "ledger_session_id": ledger.get("session_id")},
+        )
+        return ledger_with_combined(ledger)
+    if usage_event_already_recorded(ledger, event_id):
+        debug_cost("agent.response duplicate skipped", {"event_id": event_id})
+        return ledger_with_combined(ledger)
     agent = ledger["agent"]
     agent["model"] = model or agent["model"]
 
@@ -2309,12 +2351,26 @@ def record_agent_response_usage(model: str, usage: dict[str, Any]) -> dict[str, 
         bucket[key] = int(bucket.get(key, 0)) + int(value)
     bucket["estimated_cost_usd"] = round(float(bucket["estimated_cost_usd"]) + event_cost, 6)
     agent["events"] = int(agent.get("events", 0)) + 1
+    remember_usage_event(ledger, event_id)
 
     return ledger_with_combined(save_ledger(ledger))
 
 
-def record_agent_transcription_usage(usage: dict[str, Any]) -> dict[str, Any]:
+def record_agent_transcription_usage(
+    usage: dict[str, Any],
+    event_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     ledger = load_ledger()
+    if session_id and session_id != ledger.get("session_id"):
+        debug_cost(
+            "agent.transcription stale-session skipped",
+            {"event_id": event_id, "event_session_id": session_id, "ledger_session_id": ledger.get("session_id")},
+        )
+        return ledger_with_combined(ledger)
+    if usage_event_already_recorded(ledger, event_id):
+        debug_cost("agent.transcription duplicate skipped", {"event_id": event_id})
+        return ledger_with_combined(ledger)
     agent = ledger["agent"]
     bucket = agent["transcription_usage"]
 
@@ -2326,6 +2382,7 @@ def record_agent_transcription_usage(usage: dict[str, Any]) -> dict[str, Any]:
     for key, value in token_map.items():
         bucket[key] = int(bucket.get(key, 0)) + int(value)
     bucket["estimated_cost_usd"] = round(float(bucket["estimated_cost_usd"]) + event_cost, 6)
+    remember_usage_event(ledger, event_id)
 
     return ledger_with_combined(save_ledger(ledger))
 
@@ -3538,11 +3595,13 @@ def metrics_cost_event():
     usage_type = str(payload.get("usage_type", "response")).lower()
     usage = payload.get("usage", {}) or {}
     model = str(payload.get("model") or REALTIME_MODEL)
+    event_id = str(payload.get("event_id") or "").strip() or None
+    session_id = str(payload.get("session_id") or "").strip() or None
 
     if source == "agent" and usage_type == "response":
-        return success_json(record_agent_response_usage(model, usage))
+        return success_json(record_agent_response_usage(model, usage, event_id=event_id, session_id=session_id))
     if source == "agent" and usage_type == "transcription":
-        return success_json(record_agent_transcription_usage(usage))
+        return success_json(record_agent_transcription_usage(usage, event_id=event_id, session_id=session_id))
     if source == "supervisor":
         return success_json(record_supervisor_usage(model, usage))
     if source == "language_coach":

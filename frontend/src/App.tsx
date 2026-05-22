@@ -62,7 +62,18 @@ type CallRecord = {
   disposition: CallDisposition
   costUsd: number
   totalTokens: number
+  modeCostUsd?: number
+  modeTokens?: number
   summary: CallSummary | null
+}
+
+type CostEventPayload = {
+  event_id: string
+  session_id: string
+  source: 'agent' | 'supervisor' | 'language_coach'
+  usage_type: 'response' | 'transcription'
+  model: string
+  usage: Record<string, unknown>
 }
 
 type AgentActivityEntry = {
@@ -161,6 +172,7 @@ function emptyCosts(): CostState {
       transcription_usage: {
         model: 'gpt-4o-mini-transcribe',
         audio_input_tokens: 0,
+        text_input_tokens: 0,
         text_output_tokens: 0,
         estimated_cost_usd: 0,
       },
@@ -199,6 +211,7 @@ function emptyCosts(): CostState {
       estimated_cost_usd: 0,
     },
     updated_at: '',
+    session_id: '',
     price_table_version: '',
     price_table: {},
   }
@@ -260,6 +273,56 @@ function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return `${m}:${String(s).padStart(2, '0')}`
+}
+
+const PENDING_COST_EVENTS_STORAGE_KEY = 'dhl_pending_cost_events_v1'
+
+function costEventKey(payload: Pick<CostEventPayload, 'event_id' | 'session_id'>): string {
+  return `${payload.session_id}:${payload.event_id}`
+}
+
+function loadPendingCostEvents(): CostEventPayload[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(PENDING_COST_EVENTS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item): item is CostEventPayload => {
+      if (!item || typeof item !== 'object') return false
+      return (
+        typeof item.event_id === 'string' &&
+        item.event_id.trim().length > 0 &&
+        typeof item.session_id === 'string' &&
+        item.session_id.trim().length > 0 &&
+        typeof item.source === 'string' &&
+        typeof item.usage_type === 'string' &&
+        typeof item.model === 'string' &&
+        item.usage !== null &&
+        typeof item.usage === 'object'
+      )
+    })
+  } catch {
+    return []
+  }
+}
+
+function persistPendingCostEvents(events: Iterable<CostEventPayload>) {
+  if (typeof window === 'undefined') return
+  try {
+    const next = Array.from(events)
+    if (next.length === 0) {
+      window.localStorage.removeItem(PENDING_COST_EVENTS_STORAGE_KEY)
+      return
+    }
+    window.localStorage.setItem(PENDING_COST_EVENTS_STORAGE_KEY, JSON.stringify(next))
+  } catch {
+    // storage unavailable - ignore
+  }
+}
+
+function buildFallbackCostEventId(prefix: string): string {
+  return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
 }
 
 type AppProps = {
@@ -359,8 +422,10 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const bootstrapRequestIdRef = useRef(0)
   const callStartRef = useRef<number | null>(null)
   const sessionStartRef = useRef<number | null>(null)
+  const costRetryTimeoutRef = useRef<number | null>(null)
 
   const bootstrapRef = useRef<BootstrapResponse | null>(null)
+  const costsRef = useRef<CostState>(emptyCosts())
   const transcriptRef = useRef<TranscriptEntry[]>([])
   const toolCallsRef = useRef<ToolCallEntry[]>([])
   const dispositionRef = useRef<CallDisposition>('Awaiting call')
@@ -370,10 +435,17 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const selectedRealtimeModelRef = useRef('gpt-realtime-mini')
   const languageAdviceRef = useRef<LanguageAdvice>(defaultLanguageAdvice())
   const coachingHintsRef = useRef<string[]>([])
+  const pendingCostEventsRef = useRef<Map<string, CostEventPayload>>(
+    new Map(loadPendingCostEvents().map((event) => [costEventKey(event), event])),
+  )
 
   useEffect(() => {
     bootstrapRef.current = bootstrap
   }, [bootstrap])
+
+  useEffect(() => {
+    costsRef.current = costs
+  }, [costs])
 
   useEffect(() => {
     transcriptRef.current = transcript
@@ -406,6 +478,45 @@ export default function App({ username, onLogout }: AppProps = {}) {
   useEffect(() => {
     languageAdviceRef.current = languageAdvice
   }, [languageAdvice])
+
+  useEffect(() => {
+    return () => {
+      if (costRetryTimeoutRef.current !== null) {
+        window.clearTimeout(costRetryTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  const syncPendingCostEvents = () => {
+    persistPendingCostEvents(pendingCostEventsRef.current.values())
+  }
+
+  const flushPendingCostEvents = useEffectEvent(async () => {
+    const pending = Array.from(pendingCostEventsRef.current.values())
+    if (pending.length === 0) return
+
+    let latestCosts: CostState | null = null
+    for (const event of pending) {
+      try {
+        latestCosts = await recordCostEvent(event)
+        pendingCostEventsRef.current.delete(costEventKey(event))
+        syncPendingCostEvents()
+      } catch {
+        if (costRetryTimeoutRef.current === null) {
+          costRetryTimeoutRef.current = window.setTimeout(() => {
+            costRetryTimeoutRef.current = null
+            void flushPendingCostEvents()
+          }, 3000)
+        }
+        return
+      }
+    }
+
+    if (latestCosts) {
+      costsRef.current = latestCosts
+      startTransition(() => setCosts(latestCosts))
+    }
+  })
 
   // Auto-scroll transcript on new entries.
   useEffect(() => {
@@ -520,6 +631,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const syncBootstrap = (payload: BootstrapResponse) => {
     setBootstrap(payload)
     setBoard(payload.board)
+    costsRef.current = payload.costs
     setCosts(payload.costs)
     const defaultLanguageId = payload.config.default_language_id ?? 'hinglish'
     const defaultRealtimeModel = payload.config.realtime_model ?? 'gpt-realtime-mini'
@@ -559,9 +671,15 @@ export default function App({ username, onLogout }: AppProps = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    if (callState === 'loading' || callState === 'error') return
+    void flushPendingCostEvents()
+  }, [callState])
+
   const refreshRuntimeState = useEffectEvent(async () => {
     try {
       const [nextCosts, nextBoard] = await Promise.all([fetchCosts(), fetchSupervisorBoard()])
+      costsRef.current = nextCosts
       startTransition(() => {
         setCosts(nextCosts)
         setBoard(nextBoard)
@@ -771,17 +889,26 @@ export default function App({ username, onLogout }: AppProps = {}) {
     sendRealtimeEvent(event)
   }
 
-  const applyCostUpdate = useEffectEvent(async (body: {
-    source: 'agent' | 'supervisor' | 'language_coach'
-    usage_type: 'response' | 'transcription'
-    model: string
-    usage: Record<string, unknown>
-  }) => {
+  const applyCostUpdate = useEffectEvent(async (body: CostEventPayload) => {
+    pendingCostEventsRef.current.set(costEventKey(body), body)
+    syncPendingCostEvents()
+
     try {
       const nextCosts = await recordCostEvent(body)
+      pendingCostEventsRef.current.delete(costEventKey(body))
+      syncPendingCostEvents()
+      costsRef.current = nextCosts
       startTransition(() => setCosts(nextCosts))
+      if (pendingCostEventsRef.current.size > 0) {
+        void flushPendingCostEvents()
+      }
     } catch {
-      // Cost telemetry is advisory.
+      if (costRetryTimeoutRef.current === null) {
+        costRetryTimeoutRef.current = window.setTimeout(() => {
+          costRetryTimeoutRef.current = null
+          void flushPendingCostEvents()
+        }, 3000)
+      }
     }
   })
 
@@ -839,6 +966,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         coaching_hints: coachingHintsRef.current.slice(0, 5),
         language_advice: languageAdviceOverride ?? languageAdviceRef.current,
       })
+      costsRef.current = result.costs
       startTransition(() => setCosts(result.costs))
       applyBackendToolCalls(result.tool_calls)
 
@@ -890,6 +1018,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
       const nextLanguageId = nextAdvice.suggested_language_id || activeLanguageRef.current
       languageAdviceRef.current = nextAdvice
       activeLanguageRef.current = nextLanguageId
+      costsRef.current = result.costs
       startTransition(() => {
         setCosts(result.costs)
         setLanguageAdvice(nextAdvice)
@@ -960,6 +1089,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
       const nextLanguageId = nextAdvice.suggested_language_id || activeLanguageRef.current
       languageAdviceRef.current = nextAdvice
       activeLanguageRef.current = nextLanguageId
+      costsRef.current = result.costs
       startTransition(() => {
         setCosts(result.costs)
         setLanguageAdvice(nextAdvice)
@@ -1031,6 +1161,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         disposition: dispositionRef.current,
         turn_number: turnNumberRef.current,
       })
+      costsRef.current = result.costs
       startTransition(() => {
         setBoard(result.board)
         setCosts(result.costs)
@@ -1101,6 +1232,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         })
       }
 
+      costsRef.current = result.costs
       startTransition(() => setCosts(result.costs))
 
       applyBackendToolCalls(result.tool_calls)
@@ -1271,6 +1403,11 @@ export default function App({ username, onLogout }: AppProps = {}) {
       const usage = event.usage
       if (usage && typeof usage === 'object') {
         await applyCostUpdate({
+          event_id:
+            typeof event.item_id === 'string'
+              ? `agent-transcription:${event.item_id}`
+              : buildFallbackCostEventId('agent-transcription'),
+          session_id: costsRef.current.session_id || bootstrapRef.current?.costs.session_id || '',
           source: 'agent',
           usage_type: 'transcription',
           model: bootstrapRef.current?.config.transcription_model ?? 'gpt-4o-mini-transcribe',
@@ -1312,6 +1449,11 @@ export default function App({ username, onLogout }: AppProps = {}) {
       const usage = responsePayload.usage
       if (usage && typeof usage === 'object') {
         await applyCostUpdate({
+          event_id:
+            typeof responsePayload.id === 'string'
+              ? `agent-response:${responsePayload.id}`
+              : buildFallbackCostEventId('agent-response'),
+          session_id: costsRef.current.session_id || bootstrapRef.current?.costs.session_id || '',
           source: 'agent',
           usage_type: 'response',
           model: selectedRealtimeModelRef.current || bootstrapRef.current?.config.realtime_model || 'gpt-realtime-mini',
@@ -1514,6 +1656,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         model: selectedRealtimeModelRef.current,
         transcription_model: snapshot.config.transcription_model,
       })
+      costsRef.current = resetCosts
       startTransition(() => setCosts(resetCosts))
 
       const session = await createRealtimeSession({
@@ -1640,6 +1783,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         })
         summary = result.summary
         finalCosts = result.costs
+        costsRef.current = result.costs
         startTransition(() => {
           setCallSummary(result.summary)
           setCosts(result.costs)
@@ -1674,7 +1818,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         // Best effort.
       }
 
-      const snap = finalCosts ?? costs
+      const snap = finalCosts ?? costsRef.current
       const modeCostUsd =
         mode === 'voice'
           ? snap.agent.estimated_cost_usd
@@ -1690,8 +1834,10 @@ export default function App({ username, onLogout }: AppProps = {}) {
         durationSec: Math.max(0, Math.round((endedAt - startedAt) / 1000)),
         mode,
         disposition: dispositionRef.current,
-        costUsd: modeCostUsd,
-        totalTokens: modeTokens,
+        costUsd: snap.combined.estimated_cost_usd,
+        totalTokens: snap.combined.total_tokens,
+        modeCostUsd,
+        modeTokens,
         summary,
       }
       setCallHistory((prev) => [record, ...prev])
@@ -1752,6 +1898,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         model: selectedRealtimeModelRef.current,
         transcription_model: snapshot.config.transcription_model,
       })
+      costsRef.current = resetCosts
       startTransition(() => setCosts(resetCosts))
 
       const result = await chatTurn({
@@ -1764,6 +1911,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
           },
         ],
       })
+      costsRef.current = result.costs
       startTransition(() => setCosts(result.costs))
       if (result.assistant_text) {
         finalizeAssistantDraft(result.assistant_text)
@@ -1824,11 +1972,17 @@ export default function App({ username, onLogout }: AppProps = {}) {
     return {
       ...model,
       textInput: pricing.text_input_per_million ?? 0,
+      textCachedInput: pricing.text_cached_input_per_million ?? 0,
       textOutput: pricing.text_output_per_million ?? 0,
       audioInput: pricing.audio_input_per_million ?? 0,
+      audioCachedInput: pricing.audio_cached_input_per_million ?? 0,
       audioOutput: pricing.audio_output_per_million ?? 0,
     }
   })
+  const transcriptionPricing =
+    costs.price_table[
+      bootstrap?.config.transcription_model ?? costs.agent.transcription_usage.model ?? 'gpt-4o-mini-transcribe'
+    ] ?? {}
 
   const stageTone =
     callState === 'error'
@@ -2265,6 +2419,10 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   <div className="cost-block__value">{formatUsd(costs.agent.estimated_cost_usd)}</div>
                   <div className="cost-block__meta">
                     <span>{formatNumber(costs.agent.total_tokens)} tok</span>
+                    <span>voice {formatUsd(costs.agent.response_usage.estimated_cost_usd)}</span>
+                    <span>stt {formatUsd(costs.agent.transcription_usage.estimated_cost_usd)}</span>
+                    <span>cached audio {formatNumber(costs.agent.response_usage.audio_cached_input_tokens)}</span>
+                    <span>transcript out {formatNumber(costs.agent.transcription_usage.text_output_tokens)}</span>
                     <span>· audio in {formatNumber(costs.agent.response_usage.audio_input_tokens)}</span>
                     <span>· audio out {formatNumber(costs.agent.response_usage.audio_output_tokens)}</span>
                   </div>
@@ -2280,6 +2438,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   </div>
                   <div className="cost-block__meta">
                     <span>{formatNumber(costs.chat_agent?.total_tokens ?? 0)} tok</span>
+                    <span>cached {formatNumber(costs.chat_agent?.text_cached_input_tokens ?? 0)}</span>
                     <span>· in {formatNumber(costs.chat_agent?.text_input_tokens ?? 0)}</span>
                     <span>· out {formatNumber(costs.chat_agent?.text_output_tokens ?? 0)}</span>
                   </div>
@@ -2451,12 +2610,25 @@ export default function App({ username, onLogout }: AppProps = {}) {
                         </div>
                         <div className="realtime-rate-card__meta">
                           <span>Audio in ${model.audioInput.toFixed(2)}/1M</span>
+                          <span>Cached audio in ${model.audioCachedInput.toFixed(2)}/1M</span>
                           <span>Audio out ${model.audioOutput.toFixed(2)}/1M</span>
                           <span>Text in ${model.textInput.toFixed(2)}/1M</span>
+                          <span>Cached text in ${model.textCachedInput.toFixed(2)}/1M</span>
                           <span>Text out ${model.textOutput.toFixed(2)}/1M</span>
                         </div>
                       </div>
                     ))}
+                    <div className="realtime-rate-card" key="transcription-model">
+                      <div className="realtime-rate-card__head">
+                        <strong>Transcription</strong>
+                        <span>{bootstrap?.config.transcription_model ?? costs.agent.transcription_usage.model}</span>
+                      </div>
+                      <div className="realtime-rate-card__meta">
+                        <span>Audio in ${(transcriptionPricing.audio_input_per_million ?? 0).toFixed(2)}/1M</span>
+                        <span>Prompt text in ${(transcriptionPricing.text_input_per_million ?? 0).toFixed(2)}/1M</span>
+                        <span>Text out ${(transcriptionPricing.text_output_per_million ?? 0).toFixed(2)}/1M</span>
+                      </div>
+                    </div>
                   </div>
                   <div className="coach-note">{languageAdvice.nudge}</div>
                 </div>
