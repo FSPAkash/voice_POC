@@ -24,6 +24,8 @@ const DEVANAGARI_RE = /[\u0900-\u097F]/
 const BENGALI_RE = /[\u0980-\u09FF]/
 const HINGLISH_IN_ENGLISH_RE =
   /\b(?:aap|accha|acha|haan|haanji|hanji|ji|hoon|hai|main|mein|mera|meri|kar(?:ta|ti|unga|ungi)?|raha|rahi|rahe|bilkul|namaste|theek|thik|kya|kyun|nahi|nahin|matlab|samjha|samjhi|dheere|paisa|paise|rupaye|thoda|bahut|abhi|phir|kuch|sahi|galat|lekin|magar|wala|wali|hamaare|hamare|aage|badhoon|pehle|baad)\b/i
+const ROMANIZED_HINDI_RE =
+  /\b(?:aap|aapko|aapke|aapka|main|mein|hoon|hain|kar|karna|karte|karti|karta|kya|kyun|nahi|nahin|haan|ji|theek|thik|accha|acha|raha|rahi|rahe|baat|abhi|phir|kuch|sahi|pehle|liye|baare|bata|batao|bataye|bataiye|bolo|boliye|arre|arey|ispe|isme|kyon)\b/i
 const LANGUAGE_PROMISE_RE = /\b(?:i(?:'ll| will)|going forward|from now on)\b/i
 
 function languageById(languages: LanguageOption[], languageId: string) {
@@ -99,8 +101,11 @@ export function buildOpeningText(
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
   const isFemale = persona?.gender === 'female'
-  if (lowerLabel === 'hinglish' || lowerLabel === 'hindi') {
-    return `${greeting}, main ${agentName} DHL Express India se bol ${isFemale ? 'rahi' : 'raha'} hoon. Kya main ${contact} se baat kar ${isFemale ? 'rahi' : 'raha'} hoon?`
+  if (lowerLabel === 'hinglish') {
+    return `${greeting}, मैं ${agentName} DHL Express India से बोल ${isFemale ? 'रही' : 'रहा'} हूँ। क्या मैं ${contact} से बात कर ${isFemale ? 'रही' : 'रहा'} हूँ?`
+  }
+  if (lowerLabel === 'hindi') {
+    return `नमस्कार, मैं ${agentName} DHL Express India से बोल ${isFemale ? 'रही' : 'रहा'} हूँ। क्या मैं ${contact} से बात कर ${isFemale ? 'रही' : 'रहा'} हूँ?`
   }
   if (lowerLabel === 'bengali') {
     return `${greeting}, ami ${agentName}, DHL Express India theke bolchi. Ami ki ${contact}-er sathe kotha bolchi?`
@@ -235,8 +240,17 @@ export function detectLanguageComplianceIssue(
   }
 
   if (languageAdvice.suggested_language_id === 'hinglish') {
-    if (DEVANAGARI_RE.test(normalized) || BENGALI_RE.test(normalized)) {
-      return 'Hinglish must use Latin script only. Devanagari/Bengali script is not allowed. Rewrite in romanised Latin letters.'
+    if (BENGALI_RE.test(normalized)) {
+      return 'The reply drifted into Bengali. Repair in Hindi-dominant code-mix immediately.'
+    }
+    if (ROMANIZED_HINDI_RE.test(normalized) && !DEVANAGARI_RE.test(normalized)) {
+      return 'The reply used romanized Hindi. Repair using Devanagari for Hindi words and English script only for brand terms.'
+    }
+  }
+
+  if (languageAdvice.suggested_language_id === 'hindi') {
+    if (!DEVANAGARI_RE.test(normalized) || ROMANIZED_HINDI_RE.test(normalized)) {
+      return 'The reply violated the Hindi script lock. Repair in Hindi using Devanagari immediately.'
     }
   }
 
@@ -267,7 +281,7 @@ export function buildLanguageRepairResponse(
       instructions: [
         `Your previous reply violated the active language rule: ${issue}`,
         `Switch to ${suggestedLanguage.agent_label} immediately and CONTINUE the call from where you were — do NOT restart with a greeting, do NOT re-introduce yourself, do NOT repeat the opening. Pick up the substantive thread that was interrupted.`,
-        'A very brief one-clause apology is fine ("Apologies, switching to English now.") but you must immediately move to the next substantive step of the call (state overdue invoices, ask why payment is late, capture a promise date, etc.) — never loop back to "this is Priya from DHL".',
+        'A very brief one-clause apology is fine ("Apologies, switching to English now.") but you must immediately move to the next substantive step of the call (state overdue invoices, ask why payment is late, capture a promise date, etc.) — never loop back to the opening introduction.',
         'Do not mention internal coaching or say that you will switch later.',
         'Do not invent any invoice number, amount, overdue-days, name, or date. Only restate facts that came from a tool call this call. If unsure, say you will pull it up rather than quoting a number.',
         'Do not invent payment methods. The only sanctioned options are DHL MyBill self-serve portal and Virtual Account Number bank transfer.',

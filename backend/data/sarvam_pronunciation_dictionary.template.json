@@ -1,0 +1,24 @@
+{
+  "pronunciations": {
+    "hi-IN": {
+      "DHL": "डी एच एल",
+      "INR": "रुपये",
+      "MyBill": "माय बिल",
+      "NEFT": "एन ई एफ टी",
+      "RTGS": "आर टी जी एस",
+      "VAN": "वी ए एन",
+      "waybill": "वे बिल",
+      "GST": "जी एस टी"
+    },
+    "en-IN": {
+      "DHL": "D H L",
+      "INR": "rupees",
+      "MyBill": "My Bill",
+      "NEFT": "N E F T",
+      "RTGS": "R T G S",
+      "VAN": "V A N",
+      "waybill": "way bill",
+      "GST": "G S T"
+    }
+  }
+}

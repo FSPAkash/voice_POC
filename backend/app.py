@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import uuid
@@ -9,11 +10,29 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
+
+import base64
+import threading
+import time
 
 import requests
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except ImportError:
+    pass
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from flask_sock import Sock
 from openai import OpenAI
+
+try:
+    import websocket as ws_client  # websocket-client package; upstream Sarvam WS
+    WEBSOCKET_CLIENT_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_CLIENT_AVAILABLE = False
+    ws_client = None  # type: ignore
 
 try:
     from keep_alive import init_keep_alive
@@ -30,39 +49,170 @@ FRONTEND_INDEX_FILE = FRONTEND_DIST_DIR / "index.html"
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-REALTIME_MODEL = os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
 SUPERVISOR_MODEL = os.environ.get("OPENAI_SUPERVISOR_MODEL", "gpt-4.1-mini")
 LANGUAGE_COACH_MODEL = os.environ.get("OPENAI_LANGUAGE_COACH_MODEL", "gpt-4.1-mini")
 CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4.1")
-REALTIME_TRANSCRIPTION_MODEL = os.environ.get(
-    "OPENAI_REALTIME_TRANSCRIPTION_MODEL",
-    "gpt-4o-mini-transcribe",
-)
-DEFAULT_REALTIME_VOICE = os.environ.get("OPENAI_REALTIME_VOICE", "cedar")
+POLICY_ENGINE_MODE = os.environ.get("POLICY_ENGINE_MODE", "llm").strip().lower()
 
-# Voice -> agent persona. The realtime API picks the voice; the prompt must use a
+
+def _chat_kwargs(model: str, temperature: float) -> dict[str, Any]:
+    """gpt-5 family rejects custom temperature (only default=1 allowed).
+    Strip the param for those models, keep it for everything else."""
+    if model.lower().startswith("gpt-5"):
+        return {}
+    return {"temperature": temperature}
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.environ.get(name)
+    try:
+        value = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+    raw = os.environ.get(name)
+    try:
+        value = float(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+# Sarvam — replaces OpenAI realtime for both STT and TTS.
+SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
+SARVAM_BASE_URL = os.environ.get("SARVAM_BASE_URL", "https://api.sarvam.ai")
+SARVAM_TTS_MODEL = os.environ.get("SARVAM_TTS_MODEL", "bulbul:v3")
+SARVAM_STT_MODEL = os.environ.get("SARVAM_STT_MODEL", "saaras:v3")
+SARVAM_TTS_WS_URL = os.environ.get(
+    "SARVAM_TTS_WS_URL",
+    "wss://api.sarvam.ai/text-to-speech/ws",
+)
+SARVAM_STT_WS_URL = os.environ.get(
+    "SARVAM_STT_WS_URL",
+    "wss://api.sarvam.ai/speech-to-text/ws",
+)
+SARVAM_DEFAULT_FEMALE = os.environ.get("SARVAM_DEFAULT_FEMALE", "priya")
+SARVAM_DEFAULT_MALE = os.environ.get("SARVAM_DEFAULT_MALE", "ratan")
+DEFAULT_REALTIME_VOICE = SARVAM_DEFAULT_MALE  # alias kept for call sites that haven't been renamed
+# Aliases so legacy code paths that reference REALTIME_MODEL / REALTIME_TRANSCRIPTION_MODEL
+# (cost ledger labels, snapshot payload) keep compiling.
+REALTIME_MODEL = SARVAM_TTS_MODEL
+REALTIME_TRANSCRIPTION_MODEL = SARVAM_STT_MODEL
+SARVAM_TTS_SAMPLE_RATE = _env_int("SARVAM_TTS_SAMPLE_RATE", 24000, minimum=8000, maximum=48000)
+SARVAM_STT_SAMPLE_RATE = _env_int("SARVAM_STT_SAMPLE_RATE", 16000, minimum=8000, maximum=16000)
+SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.1, minimum=0.5, maximum=2.0)
+SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.45, minimum=0.01, maximum=1.0)
+SARVAM_TTS_MIN_BUFFER_SIZE = _env_int("SARVAM_TTS_MIN_BUFFER_SIZE", 30, minimum=30, maximum=200)
+SARVAM_TTS_MAX_CHUNK_LENGTH = _env_int("SARVAM_TTS_MAX_CHUNK_LENGTH", 200, minimum=30, maximum=400)
+SARVAM_TTS_OUTPUT_CODEC = (os.environ.get("SARVAM_TTS_OUTPUT_CODEC", "linear16") or "linear16").strip().lower()
+SARVAM_TTS_OUTPUT_BITRATE = (os.environ.get("SARVAM_TTS_OUTPUT_BITRATE", "128k") or "128k").strip()
+SARVAM_TTS_STREAM_FORMAT = "pcm_s16le" if SARVAM_TTS_OUTPUT_CODEC in {"linear16", "pcm"} else SARVAM_TTS_OUTPUT_CODEC
+SARVAM_TTS_SEND_COMPLETION_EVENT = _env_flag("SARVAM_TTS_SEND_COMPLETION_EVENT", True)
+SARVAM_TTS_DICT_ID = (os.environ.get("SARVAM_TTS_DICT_ID", "") or "").strip()
+SARVAM_STT_MODE = (os.environ.get("SARVAM_STT_MODE", "codemix") or "codemix").strip().lower()
+if SARVAM_STT_MODE not in {"transcribe", "translate", "verbatim", "translit", "codemix"}:
+    SARVAM_STT_MODE = "codemix"
+
+# Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
 VOICE_PERSONAS: dict[str, dict[str, str]] = {
-    "marin": {"name": "Priya", "gender": "female", "pronouns": "she/her"},
-    "coral": {"name": "Priya", "gender": "female", "pronouns": "she/her"},
-    "shimmer": {"name": "Aanya", "gender": "female", "pronouns": "she/her"},
-    "sage": {"name": "Meera", "gender": "female", "pronouns": "she/her"},
-    "cedar": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
-    "ash": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
-    "ballad": {"name": "Rohan", "gender": "male", "pronouns": "he/him"},
-    "echo": {"name": "Rohan", "gender": "male", "pronouns": "he/him"},
-    "verse": {"name": "Arjun", "gender": "male", "pronouns": "he/him"},
-    "alloy": {"name": "Aarav", "gender": "neutral", "pronouns": "they/them"},
+    "priya": {"name": "Priya", "gender": "female", "pronouns": "she/her"},
+    "ishita": {"name": "Ishita", "gender": "female", "pronouns": "she/her"},
+    "ritu": {"name": "Ritu", "gender": "female", "pronouns": "she/her"},
+    "simran": {"name": "Simran", "gender": "female", "pronouns": "she/her"},
+    "aditya": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
+    "ashutosh": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
+    "anand": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
+    "shubh": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
+    "ratan": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
+    "mani": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
+    # Backward-compatible v2 voices still accepted if a local .env or stale
+    # client sends them.
+    "anushka": {"name": "Priya", "gender": "female", "pronouns": "she/her"},
+    "abhilash": {"name": "Yogesh", "gender": "male", "pronouns": "he/him"},
+    "manisha": {"name": "Manisha", "gender": "female", "pronouns": "she/her"},
+    "vidya": {"name": "Vidya", "gender": "female", "pronouns": "she/her"},
+    "arya": {"name": "Arya", "gender": "female", "pronouns": "she/her"},
+    "karun": {"name": "Karun", "gender": "male", "pronouns": "he/him"},
 }
 DEFAULT_PERSONA = {"name": "Yogesh", "gender": "male", "pronouns": "he/him"}
-SUPPORTED_REALTIME_MODELS = [
-    {"id": "gpt-realtime-mini", "label": "GPT Realtime Mini"},
-    {"id": "gpt-realtime", "label": "GPT Realtime"},
+
+# Public catalogue for the frontend voice picker.
+SARVAM_VOICES = [
+    {"id": "priya", "label": "Priya (female, recommended)", "gender": "female"},
+    {"id": "ishita", "label": "Ishita (female)", "gender": "female"},
+    {"id": "ritu", "label": "Ritu (female)", "gender": "female"},
+    {"id": "simran", "label": "Simran (female)", "gender": "female"},
+    {"id": "anand", "label": "Anand (male, professional Hindi collections)", "gender": "male"},
+    {"id": "aditya", "label": "Aditya (male, professional English collections)", "gender": "male"},
+    {"id": "ashutosh", "label": "Ashutosh (male, Hindi)", "gender": "male"},
+    {"id": "shubh", "label": "Shubh (male, Hindi)", "gender": "male"},
+    {"id": "ratan", "label": "Ratan (male, authoritative Marathi/English)", "gender": "male"},
+    {"id": "mani", "label": "Mani (male, broad coverage)", "gender": "male"},
 ]
 
 
 def persona_for_voice(voice: str | None) -> dict[str, str]:
     return VOICE_PERSONAS.get((voice or DEFAULT_REALTIME_VOICE).lower(), DEFAULT_PERSONA)
+
+
+# App language_id -> Sarvam BCP-47 code.
+SARVAM_LANGUAGE_CODES: dict[str, str] = {
+    "english": "en-IN",
+    "hinglish": "hi-IN",
+    "hindi": "hi-IN",
+    "bengali": "bn-IN",
+    "gujarati": "gu-IN",
+    "kannada": "kn-IN",
+    "malayalam": "ml-IN",
+    "marathi": "mr-IN",
+    "odia": "od-IN",
+    "punjabi": "pa-IN",
+    "tamil": "ta-IN",
+    "telugu": "te-IN",
+}
+
+
+def sarvam_language_code(language_id: str | None) -> str:
+    return SARVAM_LANGUAGE_CODES.get((language_id or "hinglish").lower(), "hi-IN")
+
+
+def sarvam_stt_language_code(language_id: str | None) -> str:
+    normalized = (language_id or DEFAULT_LANGUAGE_ID).strip().lower()
+    if normalized == "hinglish":
+        return "unknown"
+    return sarvam_language_code(normalized)
+
+
+def sarvam_tts_options(language_code: str, voice: str) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "target_language_code": language_code,
+        "speaker": voice,
+        "model": SARVAM_TTS_MODEL,
+        "speech_sample_rate": SARVAM_TTS_SAMPLE_RATE,
+        "pace": SARVAM_TTS_PACE,
+        "temperature": SARVAM_TTS_TEMPERATURE,
+    }
+    if SARVAM_TTS_DICT_ID:
+        options["dict_id"] = SARVAM_TTS_DICT_ID
+    return options
 DEFAULT_ACCOUNT_ID = os.environ.get("DEMO_ACCOUNT_ID", "DHL001")
 
 OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -86,11 +236,51 @@ HUMAN_AGENT = {
     "team": "DHL Express India Collections",
 }
 
-# Per-million-token USD prices. Sources cross-checked against OpenAI's published
-# pricing (https://openai.com/api/pricing) for the GA models we use.
-# Keep this table in sync; UI reads dollars from /api/metrics/costs only.
+# Per-million-unit USD prices. OpenAI text models are still token-based; Sarvam
+# bills TTS per character and STT per second, so we use synthetic "per million"
+# rates so the existing ledger math stays uniform.
+# Sarvam publishes INR rates, so we convert them using a configurable INR/USD
+# reference rate. Default uses a recent market quote suitable for rough cost
+# estimation, not settlement accounting.
+PRICE_TABLE_VERSION = "openai+sarvam-pricing-2026-05-29"
+SARVAM_INR_PER_USD = _env_float("SARVAM_INR_PER_USD", 96.13, minimum=1.0)
+SARVAM_BULBUL_V3_INR_PER_10K_CHARS = _env_float("SARVAM_BULBUL_V3_INR_PER_10K_CHARS", 30.0, minimum=0.0)
+SARVAM_BULBUL_V2_INR_PER_10K_CHARS = _env_float("SARVAM_BULBUL_V2_INR_PER_10K_CHARS", 15.0, minimum=0.0)
+SARVAM_STT_INR_PER_HOUR = _env_float("SARVAM_STT_INR_PER_HOUR", 30.0, minimum=0.0)
+
+
+def _sarvam_chars_usd_per_million(inr_per_10k_chars: float) -> float:
+    return round((float(inr_per_10k_chars) * 100.0) / SARVAM_INR_PER_USD, 6)
+
+
+def _sarvam_seconds_usd_per_million(inr_per_hour: float) -> float:
+    return round(((float(inr_per_hour) / 3600.0) * 1_000_000.0) / SARVAM_INR_PER_USD, 6)
+
+
 DEFAULT_PRICE_TABLE = {
-    # gpt-realtime GA (audio + text). Audio rates are the dominant cost driver.
+    # Sarvam Bulbul (TTS). We meter output characters in `text_output_tokens`
+    # so the existing ledger keys keep working.
+    "bulbul:v3": {
+        "text_output_per_million": _sarvam_chars_usd_per_million(SARVAM_BULBUL_V3_INR_PER_10K_CHARS),
+    },
+    "bulbul:v2": {
+        "text_output_per_million": _sarvam_chars_usd_per_million(SARVAM_BULBUL_V2_INR_PER_10K_CHARS),
+    },
+    "bulbul:v1": {
+        "text_output_per_million": _sarvam_chars_usd_per_million(SARVAM_BULBUL_V2_INR_PER_10K_CHARS),
+    },
+    # Sarvam Saarika (STT). We meter seconds of mic audio in `audio_input_tokens`.
+    "saaras:v3": {
+        "audio_input_per_million": _sarvam_seconds_usd_per_million(SARVAM_STT_INR_PER_HOUR),
+    },
+    "saarika:v2.5": {
+        "audio_input_per_million": _sarvam_seconds_usd_per_million(SARVAM_STT_INR_PER_HOUR),
+    },
+    "saarika:v2": {
+        "audio_input_per_million": _sarvam_seconds_usd_per_million(SARVAM_STT_INR_PER_HOUR),
+    },
+    # Legacy OpenAI realtime / transcription entries retained for historical
+    # call logs, tests, and any stale client payloads that still report them.
     "gpt-realtime": {
         "text_input_per_million": 4.0,
         "text_cached_input_per_million": 0.4,
@@ -99,7 +289,6 @@ DEFAULT_PRICE_TABLE = {
         "audio_cached_input_per_million": 0.4,
         "audio_output_per_million": 64.0,
     },
-    # gpt-realtime-mini fallback for cheaper sessions if the operator switches.
     "gpt-realtime-mini": {
         "text_input_per_million": 0.6,
         "text_cached_input_per_million": 0.06,
@@ -108,16 +297,6 @@ DEFAULT_PRICE_TABLE = {
         "audio_cached_input_per_million": 0.3,
         "audio_output_per_million": 20.0,
     },
-    # gpt-4o-realtime-preview (older preview voice model — pricier than GA).
-    "gpt-4o-realtime-preview": {
-        "text_input_per_million": 5.0,
-        "text_cached_input_per_million": 2.5,
-        "text_output_per_million": 20.0,
-        "audio_input_per_million": 40.0,
-        "audio_cached_input_per_million": 2.5,
-        "audio_output_per_million": 80.0,
-    },
-    # ASR models bill audio input separately from prompt text and transcript output.
     "gpt-4o-transcribe": {
         "audio_input_per_million": 6.0,
         "text_input_per_million": 2.5,
@@ -222,130 +401,10 @@ SUPPORTED_SCRIPT_RANGES = [
     (0x08A0, 0x08FF),  # Arabic Extended-A
 ]
 
-REALTIME_TOOLS = [
-    {
-        "type": "function",
-        "name": "get_customer",
-        "description": "Fetch the DHL customer record for the active account.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "account_number": {
-                    "type": "string",
-                    "description": "DHL account number like DHL001.",
-                }
-            },
-            "required": ["account_number"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "type": "function",
-        "name": "get_invoices",
-        "description": "List the overdue invoices for a DHL customer account.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "account_number": {
-                    "type": "string",
-                    "description": "DHL account number like DHL001.",
-                }
-            },
-            "required": ["account_number"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "type": "function",
-        "name": "log_promise_to_pay",
-        "description": "Record the promise-to-pay date that the customer commits to.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "account_number": {"type": "string"},
-                "invoice_no": {"type": "string"},
-                "promise_date": {"type": "string"},
-                "notes": {"type": "string"},
-            },
-            "required": ["account_number", "promise_date"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "type": "function",
-        "name": "log_already_paid",
-        "description": "Record a claim that an invoice has already been paid.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "invoice_no": {"type": "string"},
-                "reference_number": {"type": "string"},
-                "paid_date": {"type": "string"},
-            },
-            "required": ["invoice_no"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "type": "function",
-        "name": "resend_invoice",
-        "description": "Trigger the mock invoice resend flow for MyBill or email.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "invoice_no": {"type": "string"},
-                "email": {"type": "string"},
-            },
-            "required": ["invoice_no", "email"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "type": "function",
-        "name": "log_dispute",
-        "description": "Open a dispute ticket for an invoice and capture notes. The `reason` field MUST contain the customer's specific dispute language verbatim (e.g. 'charges are too high', 'wrong weight billed') — never a generic placeholder like 'dispute raised' or 'customer disputes invoice'. If the customer disputes multiple invoices, call log_dispute once per disputed invoice_no with the same reason text.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "invoice_no": {"type": "string"},
-                "reason": {"type": "string", "description": "Customer's dispute language quoted verbatim from the transcript. Must not be empty or generic."},
-                "undisputed_amount": {"type": "number"},
-            },
-            "required": ["invoice_no", "reason"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "type": "function",
-        "name": "update_contact",
-        "description": "Capture an alternate contact person, email, or phone number.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "account_number": {"type": "string"},
-                "contact_name": {"type": "string"},
-                "phone": {"type": "string"},
-                "email": {"type": "string"},
-            },
-            "required": ["account_number"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "type": "function",
-        "name": "transfer_to_human",
-        "description": "Hand the case to a human DHL collections executive.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string"},
-                "customer_summary": {"type": "string"},
-            },
-            "required": ["reason"],
-            "additionalProperties": False,
-        },
-    },
-]
+# Legacy REALTIME_TOOLS removed. The chat-completion engine (run_chat_agent_turn)
+# is the only path that fires tools now and uses LLM_TURN_TOOLS + TOOL_HANDLERS
+# directly. Stub kept for any snapshot consumer still reading the key.
+REALTIME_TOOLS: list[dict[str, Any]] = []
 
 
 def utc_now() -> datetime:
@@ -557,9 +616,9 @@ def explicit_language_request_language_id(transcript: str) -> str | None:
             continue
         for alias in aliases:
             alias_pattern = re.escape(alias) if not alias.isascii() else rf"\b{re.escape(alias)}\b"
-            if any(re.search(pattern.format(alias=alias_pattern), text) for pattern in command_patterns):
+            if any(re.search(pattern.replace("{alias}", alias_pattern), text) for pattern in command_patterns):
                 return language_id
-            if any(re.search(pattern.format(alias=alias_pattern), text) for pattern in contextual_patterns):
+            if any(re.search(pattern.replace("{alias}", alias_pattern), text) for pattern in contextual_patterns):
                 return language_id
     return None
 
@@ -628,26 +687,11 @@ def supported_languages_payload() -> list[dict[str, Any]]:
     return [deepcopy(item) for item in SUPPORTED_LANGUAGE_OPTIONS]
 
 
-def supported_realtime_models_payload() -> list[dict[str, str]]:
-    return [deepcopy(item) for item in SUPPORTED_REALTIME_MODELS]
-
-
 STT_PROMPT_VOCAB = (
     "DHL, DHL Express India, MyBill, Virtual Account Number, invoice, overdue, "
     "promise to pay, credit note, waybill, AP team, accounts payable, "
     "Hinglish, namaste, dhanyavaad, shukriya, theek hai, accha, paisa."
 )
-
-
-def build_transcription_config(language_id: str | None) -> dict[str, Any]:
-    option = language_option(language_id)
-    transcription = {
-        "model": REALTIME_TRANSCRIPTION_MODEL,
-        "prompt": STT_PROMPT_VOCAB,
-    }
-    if option.get("transcription_language"):
-        transcription["language"] = option["transcription_language"]
-    return transcription
 
 
 # Phrases that indicate the STT model echoed an instruction-style prompt back as
@@ -663,6 +707,55 @@ STT_HALLUCINATION_MARKERS = (
     "indian regional languages at any time",
     "prefer english text for english",
 )
+
+
+_SARVAM_HALLUCINATION_MARKERS = (
+    "welcome back to my channel",
+    "subscribe to my channel",
+    "thanks for watching",
+    "thank you for watching",
+    "like and subscribe",
+    "हिंदी समाचार",
+    "नमस्कार दोस्तों",
+    "हेलो दोस्तों",
+    "today we will",
+    "in this video",
+    "i am your host",
+    "host and i am here",
+    "world is changing",
+)
+
+# Single-word filler that Saarika emits on near-silence or background noise.
+_SARVAM_FILLER_SINGLE_WORDS = {
+    "anyways", "anyway", "okay", "ok", "yeah", "yes", "no", "hmm", "mm",
+    "uh", "um", "thanks", "thank", "hello", "hi", "bye",
+    "अच्छा", "ठीक", "हाँ", "नहीं",
+}
+
+
+def is_stt_hallucination(text: str) -> bool:
+    """Drop transcripts that look like Whisper/Saarika training-data filler
+    rather than real customer speech. These show up when VAD flushes near-
+    silent buffers (cough, breath, background chatter)."""
+    if not text:
+        return True
+    lowered = text.casefold().strip().strip(".!?,").strip()
+    if any(marker in lowered for marker in _SARVAM_HALLUCINATION_MARKERS):
+        return True
+    # Frontend gates single-word fillers per-context (e.g. drops them when
+    # they arrive during agent playback, treats them as real otherwise).
+    tokens = re.findall(r"\w+", lowered)
+    # Extreme repetition (model echoing the same clause) — classic Whisper
+    # behaviour on no-speech input.
+    if len(tokens) >= 12:
+        # If the most common 3-gram appears >=3 times, treat as loop.
+        ngrams: dict[str, int] = {}
+        for i in range(len(tokens) - 2):
+            gram = " ".join(tokens[i : i + 3])
+            ngrams[gram] = ngrams.get(gram, 0) + 1
+        if ngrams and max(ngrams.values()) >= 3:
+            return True
+    return False
 
 
 def is_likely_stt_hallucination(text: str) -> bool:
@@ -702,13 +795,28 @@ def char_in_ranges(char: str, ranges: list[tuple[int, int]]) -> bool:
 
 
 HINGLISH_TOKENS = {
-    "aap", "accha", "acha", "haan", "haanji", "hanji", "ji", "hoon", "hai",
+    "aap", "aapko", "aapke", "aapka", "aapki", "accha", "acha", "haan", "haanji", "hanji", "ji", "hoon", "hai",
     "main", "mein", "mera", "meri", "kar", "karta", "karti", "karunga", "karungi",
     "raha", "rahi", "rahe", "bilkul", "namaste", "theek", "thik", "kya", "kyun",
     "nahi", "nahin", "matlab", "samjha", "samjhi", "dheere", "din", "paisa",
     "paise", "rupee", "rupaye", "thoda", "bahut", "abhi", "phir", "kuch",
     "sahi", "galat", "lekin", "magar", "ya", "aur", "wala", "wali",
+    "bata", "batao", "bataye", "bataiye", "bol", "bolo", "boliye", "samjhao",
+    "arre", "arey", "ispe", "isme", "kya", "kyon", "ka", "ke", "ki", "sirf",
+    "ab", "tak", "liye", "baar", "ek",
 }
+ROMANIZED_INDIC_TOKEN_RE = re.compile(
+    r"\b(?:aap|aapko|aapke|aapka|aapki|main|mein|hoon|hain|karna|karke|karte|karti|karta|"
+    r"kya|kyu|kyun|nahi|nahin|haan|haanji|hanji|namaste|theek|thik|accha|acha|raha|rahi|rahe|"
+    r"baat|paisa|paise|abhi|phir|kuch|sahi|baad|pehle|liye|wala|wali|saath|baare|"
+    r"din|dino|kal|aaj|kabhi|matlab|samjha|samjhi|bilkul|bata|batao|"
+    r"bataye|bataiye|bolo|boliye|suno|dekho|hota|hoti|hone|honge|"
+    r"hua|hui|huye|kisi|sakte|sakti|sakta|payenge|payega|"
+    r"payegi|deti|deta|dete|leti|leta|lete|mera|meri|mere|tera|teri|tere|hamara|"
+    r"hamari|hamare|shukriya|dhanyavaad|maaf|kripya|zaroor|bhej|jaldi|"
+    r"arre|arey|ispe|isme)\b",
+    re.IGNORECASE,
+)
 
 def has_indic_script(text: str) -> bool:
     for ch in text:
@@ -732,7 +840,7 @@ def is_plain_english(text: str) -> bool:
         return False
     if len(words) < 3:
         return False
-    if any(w in HINGLISH_TOKENS for w in words):
+    if any(w in HINGLISH_TOKENS for w in words) or ROMANIZED_INDIC_TOKEN_RE.search(stripped):
         return False
     return True
 
@@ -877,12 +985,6 @@ DETERMINISTIC_CHAT_MODEL = "deterministic-call-engine"
 DETERMINISTIC_SUPERVISOR_MODEL = "deterministic-supervisor"
 DETERMINISTIC_LANGUAGE_COACH_MODEL = "deterministic-language-coach"
 MAX_PROCESSED_USAGE_EVENT_IDS = 4096
-REALTIME_RENDERER_INSTRUCTIONS = (
-    "You are a voice renderer for a DHL collections application. "
-    "Speak only the exact approved reply supplied by the application. "
-    "Never invent facts, never call tools, and never continue the conversation on your own."
-)
-
 MONTH_NAME_TO_NUMBER = {
     "jan": 1,
     "january": 1,
@@ -920,6 +1022,30 @@ def normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def prepare_sarvam_tts_text(text: str, language_code: str | None) -> str:
+    """Normalize spoken text for Bulbul without changing the visible transcript.
+
+    This keeps the policy output intact while making business strings like
+    invoice IDs and semicolon-separated lists sound less clipped.
+    """
+    cleaned = normalize_whitespace(text)
+    if not cleaned:
+        return ""
+
+    cleaned = cleaned.replace("•", ". ")
+    cleaned = re.sub(r"\s*[;|]\s*", ". ", cleaned)
+    cleaned = re.sub(r"\b([A-Za-z]{2,})(\d{3,})\b", r"\1 \2", cleaned)
+    cleaned = re.sub(r"(\d),(?=\d{3}\b)", r"\1", cleaned)
+    cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
+    cleaned = re.sub(r"([.,!?])(?=\S)", r"\1 ", cleaned)
+
+    if (language_code or "").lower() in {"hi-in", "mr-in"}:
+        cleaned = cleaned.replace("₹", " INR ")
+        cleaned = re.sub(r"\bNo\.(?=\s*\d)", "number ", cleaned, flags=re.IGNORECASE)
+
+    return normalize_whitespace(cleaned)
+
+
 def transcript_entries_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for msg in messages:
@@ -933,11 +1059,57 @@ def transcript_entries_from_messages(messages: list[dict[str, Any]]) -> list[dic
     return entries
 
 
+def collapse_trailing_customer_messages(
+    messages: list[dict[str, Any]],
+    merged_customer_text: str | None,
+) -> list[dict[str, Any]]:
+    """When the frontend buffers multiple STT fragments into one logical turn,
+    replace the trailing customer fragments with the merged utterance before the
+    policy engine inspects the transcript."""
+    merged = normalize_whitespace(merged_customer_text or "")
+    entries = transcript_entries_from_messages(messages)
+    if not merged or not entries:
+        return entries
+
+    idx = len(entries)
+    trailing: list[str] = []
+    while idx > 0 and entries[idx - 1].get("role") == "customer":
+        trailing.append(str(entries[idx - 1].get("text") or ""))
+        idx -= 1
+    if not trailing:
+        return entries + [{"role": "customer", "text": merged}]
+
+    joined = normalize_whitespace(" ".join(reversed(trailing)))
+    if joined == merged or joined in merged or merged in joined:
+        return entries[:idx] + [{"role": "customer", "text": merged}]
+    return entries + [{"role": "customer", "text": merged}]
+
+
 def last_entry(entries: list[dict[str, Any]], role: str) -> dict[str, Any] | None:
     for entry in reversed(entries):
         if entry.get("role") == role:
             return entry
     return None
+
+
+def assistant_has_stated_purpose(entries: list[dict[str, Any]]) -> bool:
+    for entry in entries:
+        if entry.get("role") != "assistant":
+            continue
+        text = normalize_whitespace(str(entry.get("text") or "")).lower()
+        if not text:
+            continue
+        if (
+            "credit account" in text
+            or "outstanding" in text
+            or "overdue" in text
+            or "invoice" in text
+            or "इनवॉइस" in text
+            or "बकाया" in text
+            or "payment pending" in text
+        ):
+            return True
+    return False
 
 
 def count_entries(entries: list[dict[str, Any]], role: str) -> int:
@@ -956,6 +1128,47 @@ def customer_display_name(customer: dict[str, Any]) -> str:
     if contact:
         return contact
     return "there"
+
+
+def agent_intro_text(language_id: str, voice: str | None) -> str:
+    persona = persona_for_voice(voice)
+    name = persona["name"]
+    if language_id in {"hinglish", "hindi"}:
+        verb = "bol rahi hoon" if persona["gender"] == "female" else "bol raha hoon"
+        return f"Mera naam {name} hai, main DHL Express India se {verb}."
+    if language_id == "bengali":
+        return f"Amar naam {name}, ami DHL Express India theke bolchi."
+    return f"My name is {name} and I am calling from DHL Express India."
+
+
+def agent_calling_phrase(voice: str | None) -> str:
+    return "call kar rahi hoon" if persona_for_voice(voice)["gender"] == "female" else "call kar raha hoon"
+
+
+def reason_probe_text(language_id: str) -> str:
+    if language_id in {"hinglish", "hindi"}:
+        return "Kya main delay ka reason jaan sakta hoon, taaki main usko sahi tarah note kar sakoon?"
+    if language_id == "bengali":
+        return "Payment deri hocche keno, seta ki ektu bolben jate ami thik bhabe note korte pari?"
+    return "May I know the reason for the delay so that I can note it correctly?"
+
+
+def payment_date_request_text(language_id: str) -> str:
+    if language_id in {"hinglish", "hindi"}:
+        return "Kya aap next 2 business days ke andar ek exact payment date confirm kar sakte hain?"
+    if language_id == "bengali":
+        return "Apni ki agami 2 business days er moddhe ekta exact payment date confirm korte parben?"
+    return "Could you confirm an exact payment date within the next 2 business days?"
+
+
+def resolved_status_summary_text(invoices: list[dict[str, Any]], language_id: str) -> str:
+    if not any(invoice.get("history") for invoice in invoices):
+        return ""
+    if language_id in {"hinglish", "hindi"}:
+        return "Jin invoices par pehle issues the, woh resolve ho chuke hain, isliye ab sirf payment pending hai."
+    if language_id == "bengali":
+        return "Je invoice-gulote age issue chhilo, segulo resolve hoye geche, tai ekhon sudhu payment pending."
+    return "The earlier issues on these invoices have already been resolved, so the payments are simply pending now."
 
 
 def payment_options_text(language_id: str) -> str:
@@ -990,21 +1203,21 @@ def invoice_summary_line(invoice: dict[str, Any], language_id: str) -> str:
     due_date = str(invoice.get("due_date") or "")
     if language_id == "hinglish":
         return (
-            f"Pehli invoice {invoice.get('invoice_no')} hai, {amount} ki, "
+            f"Invoice {invoice.get('invoice_no')} {amount} ki hai, "
             f"jo {overdue_days} din se overdue hai aur due date {due_date} thi."
         )
     if language_id == "hindi":
         return (
-            f"Pehli invoice {invoice.get('invoice_no')} hai, {amount} ki, "
+            f"Invoice {invoice.get('invoice_no')} {amount} ki hai, "
             f"jo {overdue_days} din se overdue hai aur due date {due_date} thi."
         )
     if language_id == "bengali":
         return (
-            f"Prothom invoice {invoice.get('invoice_no')}, {amount}, "
+            f"Invoice {invoice.get('invoice_no')} {amount}, "
             f"eta {overdue_days} din overdue ebong due date chhilo {due_date}."
         )
     return (
-        f"The first overdue invoice is {invoice.get('invoice_no')} for {amount}, "
+        f"Invoice {invoice.get('invoice_no')} is for {amount}, "
         f"which is {overdue_days} days overdue and was due on {due_date}."
     )
 
@@ -1033,24 +1246,30 @@ def total_summary_text(customer: dict[str, Any], invoices: list[dict[str, Any]],
     )
 
 
-def opening_purpose_text(customer: dict[str, Any], invoices: list[dict[str, Any]], language_id: str) -> str:
-    company = str(customer.get("company_name") or "your company")
+def opening_purpose_text(
+    customer: dict[str, Any],
+    invoices: list[dict[str, Any]],
+    language_id: str,
+    voice: str | None,
+) -> str:
     target_invoice = invoices[0] if invoices else {}
     total_text = total_summary_text(customer, invoices, language_id)
     invoice_text = invoice_summary_line(target_invoice, language_id) if target_invoice else ""
-    if language_id == "hinglish":
+    resolved_text = resolved_status_summary_text(invoices, language_id)
+    intro = agent_intro_text(language_id, voice)
+    if language_id in {"hinglish", "hindi"}:
         return (
-            f"Thank you for confirming. Mera naam Yogesh hai, main DHL Express India se aapke credit account ke regarding call kar raha hoon. "
-            f"{total_text} {invoice_text} Kya aap bata sakte hain ki payment ab tak kyon nahin hui?"
+            f"Ji, dhanyavaad. {intro} Main aapke credit account ke regarding {agent_calling_phrase(voice)}. "
+            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "bengali":
         return (
-            f"Dhonnobad confirm korar jonno. Amar naam Yogesh, ami DHL Express India theke apnar credit account niye call korchi. "
-            f"{total_text} {invoice_text} Payment ekhono keno hoyni, bolben?"
+            f"Dhonnobad confirm korar jonno. {intro} Ami apnar credit account niye call korchi. "
+            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
     return (
-        f"Thank you for confirming. My name is Yogesh and I am calling from DHL Express India regarding your credit account. "
-        f"{total_text} {invoice_text} Could you please help me understand why the payment has not been made yet?"
+        f"Thank you for confirming. {intro} I am calling regarding your DHL credit account. "
+        f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
     ).strip()
 
 
@@ -1160,28 +1379,89 @@ def invoice_mentioned_in_text(text: str, invoices: list[dict[str, Any]]) -> dict
 def analyze_customer_turn(text: str) -> dict[str, Any]:
     lowered = normalize_whitespace(text).lower()
     return {
-        "is_affirmative": bool(re.search(r"\b(yes|yeah|yep|yup|haan|ha|ji|speaking|that.s me|this is he|this is she|correct)\b", lowered)),
-        "why_calling": bool(re.search(r"\b(you called me|why are you calling|what is this regarding|what is this about|what do you want|what.s this call|kis baare mein)\b", lowered)),
-        "payment_options": bool(re.search(r"\b(payment option|payment method|options|how can i pay|how do i pay|how to pay|where do i pay)\b", lowered)),
-        "invoice_copy": bool(re.search(r"\b(invoice copy|send.*invoice|resend.*invoice|not received|didn.t receive|haven.t received|don.t have the invoice)\b", lowered)),
-        "resolved_issues": bool(re.search(r"\b(resolved issue|resolved issues|conflict|dispute history|past dispute|credit note)\b", lowered)),
-        "one_at_a_time": bool(re.search(r"\b(one (?:by one|at a time)|one invoice at a time|line at a time|slowly|slow down|too fast|one (?:request|thing) (?:at a time|line))\b", lowered)),
-        "already_paid": bool(re.search(r"\b(already paid|i paid|payment done|payment made|we paid|paid it|paid that|paid this)\b", lowered)),
-        "dispute": bool(re.search(r"\b(dispute|wrong charge|billing error|price mismatch|delayed shipment|incorrect amount)\b", lowered)),
-        "wrong_contact": bool(re.search(r"\b(not the right person|wrong person|not the right contact|wrong number)\b", lowered)),
-        "identity_confusion": bool(re.search(r"\b(who is anthony|i am mark|i am not anthony|this is mark)\b", lowered)),
-        "cash_flow": bool(re.search(r"\b(cash flow|no funds|tight on cash|payment cycle|business problem|short on cash|liquidity)\b", lowered)),
-        "approval_pending": bool(re.search(r"\b(approval|approver|po pending|purchase order|internal approval|waiting for approval)\b", lowered)),
-        "discount": bool(re.search(r"\b(discount|waive|waiver|reduce|reduction)\b", lowered)),
-        "asks_timeline": bool(re.search(r"\b(timeline|when do i need to pay|what is my timeline|by when|deadline)\b", lowered)),
-        "refusal": bool(re.search(r"\b(don.t call me again|cannot pay|can.t pay|no commitment|refuse|won.t pay)\b", lowered)),
-        "human_request": bool(re.search(r"\b(human|live agent|representative|collections executive|real person|talk to (?:a )?person)\b", lowered)),
-        "safety": bool(re.search(r"\b(kill myself|suicide|not safe|enemy|tried to kill|hurt myself)\b", lowered)),
-        "details": bool(re.search(r"\b(details|what are the details|tell me more|elaborate|explain)\b", lowered)),
-        "count_invoices": bool(re.search(r"\b(how many invoice|how many bill|number of invoice|count of invoice|how many are (?:there|outstanding|overdue|pending))\b", lowered)),
-        "which_invoice": bool(re.search(r"\b(which invoice|what invoice|invoice numbers?|list (?:the )?invoices?|all invoices)\b", lowered)),
-        "amount_query": bool(re.search(r"\b(how much|what.s the amount|total amount|total outstanding|what do i owe|how much do i owe)\b", lowered)),
-        "repeat_request": bool(re.search(r"\b(repeat|say again|come again|pardon|sorry,? what)\b", lowered)),
+        "is_affirmative": bool(re.search(
+            r"(?:\b(?:yes|yeah|yep|yup|haan|ha|ji|speaking|that.s me|this is he|this is she|correct)\b|हाँ|हां|जी|मैं ही|मै ही|यही|बोल रहा हूँ|बोल रही हूँ|बात कर रहा हूँ|बात कर रही हूँ|तुम .*से बात कर रहे हो)",
+            lowered,
+        )),
+        "why_calling": bool(re.search(
+            r"(?:\b(?:you called me|why are you calling|what is this regarding|what is this about|what do you want|what.s this call|kis baare mein)\b|किस बात|किस बारे|क्यों कॉल|क्यों फोन|किसलिए|पेमेंट किस बात|ये कॉल किस बारे)",
+            lowered,
+        )),
+        "payment_options": bool(re.search(
+            r"(?:\b(?:payment option|payment method|options|how can i pay|how do i pay|how to pay|where do i pay)\b|पेमेंट ऑप्शन|पेमेंट कैसे|कैसे पेमेंट|कहाँ पेमेंट)",
+            lowered,
+        )),
+        "invoice_copy": bool(re.search(
+            r"(?:\b(?:invoice copy|send.*invoice|resend.*invoice|not received|didn.t receive|haven.t received|don.t have the invoice)\b|इनवॉइस नहीं मिला|इनवॉइस भेज|कॉपी भेज)",
+            lowered,
+        )),
+        "resolved_issues": bool(re.search(
+            r"(?:\b(?:resolved issue|resolved issues|conflict|dispute history|past dispute|credit note)\b|क्रेडिट नोट|पुराना विवाद|पुराना डिस्प्यूट|पहले वाला issue)",
+            lowered,
+        )),
+        "one_at_a_time": bool(re.search(
+            r"(?:\b(?:one (?:by one|at a time)|one invoice at a time|line at a time|line by line|slowly|slow down|too fast|one (?:request|thing) (?:at a time|line))\b|एक-एक करके|एक एक करके|लाइन by लाइन|धीरे|एक इनवॉइस)",
+            lowered,
+        )),
+        "already_paid": bool(re.search(
+            r"(?:\b(?:already paid|i paid|payment done|payment made|we paid|paid it|paid that|paid this)\b|पेमेंट कर दिया|भुगतान कर दिया|पहले ही पेमेंट)",
+            lowered,
+        )),
+        "dispute": bool(re.search(
+            r"(?:\b(?:dispute|wrong charge|billing error|price mismatch|delayed shipment|incorrect amount)\b|डिस्प्यूट|गलत चार्ज|गलत amount|बिलिंग गलत|रेट गलत)",
+            lowered,
+        )),
+        "wrong_contact": bool(re.search(
+            r"(?:\b(?:not the right person|wrong person|not the right contact|wrong number)\b|गलत नंबर|गलत व्यक्ति|सही व्यक्ति नहीं)",
+            lowered,
+        )),
+        "identity_confusion": bool(re.search(
+            r"(?:\b(?:who is anthony|i am mark|i am not anthony|this is mark)\b|मैं एंथनी नहीं|मैं मार्क हूँ|मैं मार्क हूं|एंथनी नहीं)",
+            lowered,
+        )),
+        "cash_flow": bool(re.search(
+            r"(?:\b(?:cash flow|no funds|tight on cash|payment cycle|business problem|short on cash|liquidity)\b|पैसे नहीं|फंड नहीं|कैश फ्लो|cash नहीं)",
+            lowered,
+        )),
+        "approval_pending": bool(re.search(
+            r"(?:\b(?:approval|approver|po pending|purchase order|internal approval|waiting for approval)\b|अप्रूवल|मंजूरी|approval pending|po pending)",
+            lowered,
+        )),
+        "discount": bool(re.search(r"(?:\b(?:discount|waive|waiver|reduce|reduction)\b|डिस्काउंट|कम कर|रिड्यूस)", lowered)),
+        "asks_timeline": bool(re.search(
+            r"(?:\b(?:timeline|when do i need to pay|what is my timeline|by when|deadline)\b|कब तक|किस तारीख तक|डेडलाइन)",
+            lowered,
+        )),
+        "will_pay": bool(re.search(
+            r"(?:\b(?:i will pay|we will pay|i can pay|we can pay|i.ll pay|we.ll pay|payment (?:will be|can be) released|arrange payment|release payment|pay soon|payment soon)\b|pay kar dunga|pay kar denge|payment kar dunga|payment kar denge|payment release kar dunga|payment release kar denge|कर दूंगा|कर देंगे|पेमेंट कर दूंगा|पेमेंट कर देंगे|भुगतान कर दूंगा|भुगतान कर देंगे)",
+            lowered,
+        )),
+        "refusal": bool(re.search(
+            r"(?:\b(?:don.t call me again|cannot pay|can.t pay|no commitment|refuse|won.t pay)\b|पेमेंट नहीं कर सकता|भुगतान नहीं कर सकता|नहीं दूँगा|नहीं दूंगा)",
+            lowered,
+        )),
+        "human_request": bool(re.search(
+            r"(?:\b(?:human|live agent|representative|collections executive|real person|talk to (?:a )?person)\b|किसी इंसान|real person|कलेक्शंस executive)",
+            lowered,
+        )),
+        "safety": bool(re.search(r"(?:\b(?:kill myself|suicide|not safe|enemy|tried to kill|hurt myself)\b|आत्महत्या)", lowered)),
+        "details": bool(re.search(
+            r"(?:\b(?:details|what are the details|tell me more|elaborate|explain)\b|डिटेल्स|डिटेल|बताओ|और बताओ|समझाओ)",
+            lowered,
+        )),
+        "count_invoices": bool(re.search(
+            r"(?:\b(?:how many invoice|how many bill|number of invoice|count of invoice|how many are (?:there|outstanding|overdue|pending))\b|कितने इनवॉइस|कितने invoices)",
+            lowered,
+        )),
+        "which_invoice": bool(re.search(
+            r"(?:\b(?:which invoice|what invoice|invoice numbers?|list (?:the )?invoices?|all invoices)\b|कौन से इनवॉइस|कौनसे इनवॉइस|इनवॉइस बताओ|इनवॉइसेस बताओ)",
+            lowered,
+        )),
+        "amount_query": bool(re.search(
+            r"(?:\b(?:how much|what.s the amount|total amount|total outstanding|what do i owe|how much do i owe)\b|कितना amount|कितना पेमेंट|कुल कितना|कुल अमाउंट|टोटल कितना)",
+            lowered,
+        )),
+        "repeat_request": bool(re.search(r"(?:\b(?:repeat|say again|come again|pardon|sorry,? what)\b|दुबारा|फिर से|क्या कहा)", lowered)),
     }
 
 
@@ -1219,7 +1499,6 @@ def generate_collections_reply(
     language_advice: dict[str, Any] | None = None,
     prior_tool_calls: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[dict[str, Any]], str]:
-    del voice  # conversation policy is deterministic and voice-agnostic here
     entries = transcript_entries_from_messages(messages)
     customer = get_customer(account_number) or {}
     invoices = get_invoices(account_number)
@@ -1236,15 +1515,16 @@ def generate_collections_reply(
     signals = analyze_customer_turn(customer_text)
     constants = get_collections_constants()
     target_invoice = invoice_mentioned_in_text(customer_text, invoices) or (invoices[0] if invoices else {})
+    purpose_already_stated = assistant_has_stated_purpose(entries)
 
     if count_entries(entries, "assistant") == 0:
         contact = customer_display_name(customer) or "the accounts payable contact"
-        if language_id == "hinglish":
-            text = f"Good day, mera naam Yogesh hai aur main DHL Express India se bol raha hoon. Kya main {contact} se baat kar raha hoon?"
+        if language_id in {"hinglish", "hindi"}:
+            text = f"Good day, {agent_intro_text(language_id, voice)} Kya main {contact} se baat kar raha hoon?"
         elif language_id == "bengali":
-            text = f"Good day, amar naam Yogesh, ami DHL Express India theke bolchi. Ami ki {contact}-er sathe kotha bolchi?"
+            text = f"Good day, {agent_intro_text(language_id, voice)} Ami ki {contact}-er sathe kotha bolchi?"
         else:
-            text = f"Good day, my name is Yogesh and I am calling from DHL Express India. Am I speaking with {contact}?"
+            text = f"Good day, {agent_intro_text(language_id, voice)} Am I speaking with {contact}?"
         return (text, tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if signals["safety"]:
@@ -1254,7 +1534,7 @@ def generate_collections_reply(
         }
         result = run_tool("transfer_to_human", args)
         tool_calls.append(build_tool_call_entry("transfer_to_human", args, result))
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "Mujhe bahut afsos hai yeh sun kar. Aapki safety sabse important hai, "
                 "isliye main abhi is call ko turant human team ko escalate kar raha hoon.",
@@ -1269,19 +1549,27 @@ def generate_collections_reply(
 
     if count_entries(entries, "assistant") <= 1 and signals["is_affirmative"]:
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
-        total = total_summary_text(customer, invoices, language_id)
-        if language_id == "hinglish":
-            ask = "Kya aap bata sakte hain ki payment ab tak kyon nahin hui?"
-        else:
-            ask = "Could you share why payment has not been made yet?"
-        return (
-            f"{total} {ask}",
-            tool_calls,
-            DETERMINISTIC_CHAT_MODEL,
-        )
+        return (opening_purpose_text(customer, invoices, language_id, voice), tool_calls, DETERMINISTIC_CHAT_MODEL)
+
+    # Recovery guardrail: if the outbound reason for the call has not been
+    # stated yet, do not skip straight to asking for a payment date. Recover by
+    # stating the purpose or the invoice details first, depending on what the
+    # customer asked.
+    if not purpose_already_stated and not (signals["wrong_contact"] or signals["identity_confusion"]):
+        tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
+        if signals["one_at_a_time"] or signals["count_invoices"] or signals["which_invoice"] or signals["amount_query"] or signals["details"]:
+            lines = " ".join(invoice_summary_line(inv, language_id) for inv in invoices)
+            total = total_summary_text(customer, invoices, language_id)
+            resolved = resolved_status_summary_text(invoices, language_id)
+            return (
+                f"{total} {lines} {resolved} {reason_probe_text(language_id)}".strip(),
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        return (opening_purpose_text(customer, invoices, language_id, voice), tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if signals["wrong_contact"] or signals["identity_confusion"]:
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             text = (
                 "Apologies for the confusion. Kya aap mujhe accounts payable ya payments handle karne wale sahi person se connect kar sakte hain?"
             )
@@ -1318,7 +1606,7 @@ def generate_collections_reply(
     if signals["one_at_a_time"]:
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
         line = invoice_summary_line(target_invoice, language_id) if target_invoice else ""
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 f"Theek hai, ek-ek karke batata hoon. {line} Kya is invoice ke liye payment date confirm kar sakte hain?",
                 tool_calls,
@@ -1334,14 +1622,15 @@ def generate_collections_reply(
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
         lines = " ".join(invoice_summary_line(inv, language_id) for inv in invoices)
         total = total_summary_text(customer, invoices, language_id)
-        if language_id == "hinglish":
-            ask = "Kya aap bata sakte hain ki payment ab tak kyon pending hai?"
-        else:
-            ask = "Could you share why payment is still pending?"
-        return (f"{total} {lines} {ask}".strip(), tool_calls, DETERMINISTIC_CHAT_MODEL)
+        resolved = resolved_status_summary_text(invoices, language_id)
+        return (
+            f"{total} {lines} {resolved} {reason_probe_text(language_id)}".strip(),
+            tool_calls,
+            DETERMINISTIC_CHAT_MODEL,
+        )
 
     if signals["repeat_request"]:
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "Maaf kijiye. Main dheere se dohra deta hoon. " + total_summary_text(customer, invoices, language_id),
                 tool_calls,
@@ -1354,7 +1643,7 @@ def generate_collections_reply(
         )
 
     if signals["asks_timeline"]:
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "As per agreed terms, yeh invoices already overdue hain. "
                 "Kya aap next 2 business days ke andar ek specific payment date confirm kar sakte hain?",
@@ -1368,7 +1657,7 @@ def generate_collections_reply(
         )
 
     if signals["discount"]:
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "Discount approve karne ka authority mere paas nahin hai. "
                 "Lekin agar aap payment date confirm kar dein, toh main usko note kar sakta hoon. "
@@ -1394,7 +1683,7 @@ def generate_collections_reply(
             result = run_tool("log_promise_to_pay", args)
             tool_calls.append(build_tool_call_entry("log_promise_to_pay", args, result))
             recap = payment_options_text(language_id)
-            if language_id == "hinglish":
+            if language_id in {"hinglish", "hindi"}:
                 return (
                     f"Thank you. Maine note kar liya hai ki payment {raw_date} tak release hogi. "
                     f"Please ensure payment us date tak ho jaye. {recap}",
@@ -1407,7 +1696,7 @@ def generate_collections_reply(
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 f"{raw_date} thoda zyada door lag raha hai. "
                 "Kya aap next 2 business days ke andar ek specific date confirm kar sakte hain?",
@@ -1420,6 +1709,9 @@ def generate_collections_reply(
             DETERMINISTIC_CHAT_MODEL,
         )
 
+    if signals["will_pay"]:
+        return (payment_date_request_text(language_id), tool_calls, DETERMINISTIC_CHAT_MODEL)
+
     if signals["already_paid"]:
         args = {
             "invoice_no": target_invoice.get("invoice_no"),
@@ -1429,7 +1721,7 @@ def generate_collections_reply(
         result = run_tool("log_already_paid", args)
         tool_calls.append(build_tool_call_entry("log_already_paid", args, result))
         email = constants["proof_of_payment_email"]
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 f"Understood, thank you. Kya aap transaction reference number aur paid date share kar denge? "
                 f"Please payment proof {email} par email kar dijiye, aur hum 24 hours ke andar verify karenge.",
@@ -1450,7 +1742,7 @@ def generate_collections_reply(
         }
         result = run_tool("resend_invoice", args)
         tool_calls.append(build_tool_call_entry("resend_invoice", args, result))
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 f"Bilkul. Aap pehle DHL MyBill portal par registered email se login karke invoice dekh sakte hain. "
                 f"Agar convenient ho, maine {customer.get('registered_email')} par invoice resend bhi trigger kar diya hai. "
@@ -1474,7 +1766,7 @@ def generate_collections_reply(
         }
         result = run_tool("log_dispute", args)
         tool_calls.append(build_tool_call_entry("log_dispute", args, result))
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "I understand your concern. Maine isko dispute ke roop mein log kar diya hai aur concerned team ko route kar diya jayega. "
                 "Agar koi undisputed amount hai, kya aap usko clear kar sakte hain meanwhile?"
@@ -1490,12 +1782,12 @@ def generate_collections_reply(
         extra = (
             "If you need the specific Virtual Account Number, I can have the collections desk share it after the call."
             if language_id == "english"
-            else "Agar aapko specific Virtual Account Number chahiye, toh collections desk call ke baad share kar sakti hai."
+            else "Agar aapko specific Virtual Account Number chahiye, toh collections desk call ke baad share kar sakta hai."
         )
         return (f"{payment_options_text(language_id)} {extra}", tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if signals["cash_flow"]:
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "Samajh sakta hoon ki cash flow tight ho sakta hai. "
                 "Kya aap partial payment abhi kar sakte hain, ya full payment ke liye ek specific date confirm kar sakte hain?"
@@ -1507,7 +1799,7 @@ def generate_collections_reply(
         )
 
     if signals["approval_pending"]:
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "Understood. Kya aap approver ka naam aur expected approval date confirm kar sakte hain? "
                 "Invoice already overdue hai, isliye request hai ki isko priority di jaye."
@@ -1525,7 +1817,7 @@ def generate_collections_reply(
         }
         result = run_tool("transfer_to_human", args)
         tool_calls.append(build_tool_call_entry("transfer_to_human", args, result))
-        if language_id == "hinglish":
+        if language_id in {"hinglish", "hindi"}:
             return (
                 "Main aapki position note kar raha hoon. Payment abhi bhi overdue hai, "
                 "isliye main is case ko human collections executive ko follow-up ke liye transfer kar raha hoon."
@@ -1536,12 +1828,14 @@ def generate_collections_reply(
             DETERMINISTIC_CHAT_MODEL,
         )
 
-    if language_id == "hinglish":
+    if language_id in {"hinglish", "hindi"}:
         return (
-            "Thank you for sharing that. Kya aap payment ke liye ek specific date confirm kar sakte hain, ideally next 2 business days ke andar?"
-        , tool_calls, DETERMINISTIC_CHAT_MODEL)
+            reason_probe_text(language_id),
+            tool_calls,
+            DETERMINISTIC_CHAT_MODEL,
+        )
     return (
-        "Thank you for sharing that. Could you confirm a specific payment date, ideally within the next 2 business days?",
+        reason_probe_text(language_id),
         tool_calls,
         DETERMINISTIC_CHAT_MODEL,
     )
@@ -1907,7 +2201,7 @@ def default_ledger(
         "processed_usage_event_ids": [],
         "session_id": f"cost_session_{uuid.uuid4().hex[:12]}",
         "updated_at": utc_now_iso(),
-        "price_table_version": "openai-pricing-2026-05-22",
+        "price_table_version": PRICE_TABLE_VERSION,
     }
 
 
@@ -2114,9 +2408,14 @@ def text_cost_from_usage(model: str, usage: Any) -> tuple[float, dict[str, int]]
     elif not isinstance(usage, dict):
         usage = {}
 
-    input_tokens = int(usage.get("input_tokens", 0) or 0)
-    output_tokens = int(usage.get("output_tokens", 0) or 0)
-    input_details = usage.get("input_tokens_details", {}) or usage.get("input_token_details", {}) or {}
+    input_tokens = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
+    output_tokens = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
+    input_details = (
+        usage.get("input_tokens_details", {})
+        or usage.get("input_token_details", {})
+        or usage.get("prompt_tokens_details", {})
+        or {}
+    )
     cached_input = int(input_details.get("cached_tokens", 0) or 0)
     uncached_input = max(input_tokens - cached_input, 0)
 
@@ -2130,6 +2429,26 @@ def text_cost_from_usage(model: str, usage: Any) -> tuple[float, dict[str, int]]
         "text_cached_input_tokens": cached_input,
         "text_output_tokens": output_tokens,
     }
+
+
+def sarvam_tts_cost_from_chars(model: str, char_count: int) -> tuple[float, dict[str, int]]:
+    """Sarvam Bulbul bills per character of output text. We stash the count in
+    `text_output_tokens` so the existing ledger summing logic keeps working."""
+    chars = max(int(char_count or 0), 0)
+    pricing = PRICE_TABLE.get(price_table_key_for_model(model), {})
+    rate = float(pricing.get("text_output_per_million", 0.0))
+    cost = chars * rate / 1_000_000
+    return cost, {"text_output_tokens": chars}
+
+
+def sarvam_stt_cost_from_seconds(model: str, seconds: float) -> tuple[float, dict[str, int]]:
+    """Sarvam Saarika bills per second of mic audio. We stash whole seconds in
+    `audio_input_tokens` to reuse the existing ledger schema."""
+    secs = max(int(math.ceil(float(seconds or 0.0))), 0)
+    pricing = PRICE_TABLE.get(price_table_key_for_model(model), {})
+    rate = float(pricing.get("audio_input_per_million", 0.0))
+    cost = secs * rate / 1_000_000
+    return cost, {"audio_input_tokens": secs}
 
 
 def load_sap_fixture() -> dict[str, Any]:
@@ -2260,6 +2579,7 @@ def save_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
         + float(ledger["agent"]["transcription_usage"]["estimated_cost_usd"])
     )
     ledger["agent"]["estimated_cost_usd"] = round(agent_total, 6)
+    ledger["price_table_version"] = PRICE_TABLE_VERSION
     ledger["agent"]["total_tokens"] = (
         sum(
             int(value)
@@ -2317,7 +2637,7 @@ def ledger_with_combined(ledger: dict[str, Any]) -> dict[str, Any]:
         },
         "updated_at": ledger["updated_at"],
         "session_id": ledger.get("session_id", ""),
-        "price_table_version": ledger.get("price_table_version", "openai-pricing-2026-05-22"),
+        "price_table_version": PRICE_TABLE_VERSION,
         "price_table": PRICE_TABLE,
     }
 
@@ -2378,6 +2698,73 @@ def record_agent_transcription_usage(
     debug_cost(
         f"agent.transcription model={bucket['model']}",
         {"raw_usage": usage, "computed_tokens": token_map, "event_cost_usd": event_cost},
+    )
+    for key, value in token_map.items():
+        bucket[key] = int(bucket.get(key, 0)) + int(value)
+    bucket["estimated_cost_usd"] = round(float(bucket["estimated_cost_usd"]) + event_cost, 6)
+    remember_usage_event(ledger, event_id)
+
+    return ledger_with_combined(save_ledger(ledger))
+
+
+def record_sarvam_tts_usage(
+    chars: int,
+    event_id: str | None = None,
+    session_id: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    ledger = load_ledger()
+    if session_id and session_id != ledger.get("session_id"):
+        debug_cost(
+            "sarvam.tts stale-session skipped",
+            {"event_id": event_id, "event_session_id": session_id, "ledger_session_id": ledger.get("session_id")},
+        )
+        return ledger_with_combined(ledger)
+    if usage_event_already_recorded(ledger, event_id):
+        debug_cost("sarvam.tts duplicate skipped", {"event_id": event_id})
+        return ledger_with_combined(ledger)
+    agent = ledger["agent"]
+    agent["model"] = model or SARVAM_TTS_MODEL
+
+    event_cost, token_map = sarvam_tts_cost_from_chars(agent["model"], chars)
+    debug_cost(
+        f"sarvam.tts model={agent['model']}",
+        {"chars": chars, "event_cost_usd": event_cost},
+    )
+    bucket = agent["response_usage"]
+    for key, value in token_map.items():
+        bucket[key] = int(bucket.get(key, 0)) + int(value)
+    bucket["estimated_cost_usd"] = round(float(bucket["estimated_cost_usd"]) + event_cost, 6)
+    agent["events"] = int(agent.get("events", 0)) + 1
+    remember_usage_event(ledger, event_id)
+
+    return ledger_with_combined(save_ledger(ledger))
+
+
+def record_sarvam_stt_usage(
+    seconds: float,
+    event_id: str | None = None,
+    session_id: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    ledger = load_ledger()
+    if session_id and session_id != ledger.get("session_id"):
+        debug_cost(
+            "sarvam.stt stale-session skipped",
+            {"event_id": event_id, "event_session_id": session_id, "ledger_session_id": ledger.get("session_id")},
+        )
+        return ledger_with_combined(ledger)
+    if usage_event_already_recorded(ledger, event_id):
+        debug_cost("sarvam.stt duplicate skipped", {"event_id": event_id})
+        return ledger_with_combined(ledger)
+    agent = ledger["agent"]
+    bucket = agent["transcription_usage"]
+    bucket["model"] = model or SARVAM_STT_MODEL
+
+    event_cost, token_map = sarvam_stt_cost_from_seconds(bucket["model"], seconds)
+    debug_cost(
+        f"sarvam.stt model={bucket['model']}",
+        {"seconds": seconds, "event_cost_usd": event_cost},
     )
     for key, value in token_map.items():
         bucket[key] = int(bucket.get(key, 0)) + int(value)
@@ -2701,8 +3088,16 @@ def llm_collections_turn(
     grounded = build_grounded_context(account_number)
     language_directive = {
         "english": "HARD LANGUAGE LOCK: reply 100% in English. Zero Hindi/Hinglish/Bengali words. No 'aap', 'main', 'hoon', 'kar', 'kya', 'haan', 'ji', 'namaste'. Use only English script and English vocabulary.",
-        "hinglish": "Reply in Hinglish (romanised Latin script only — never Devanagari).",
-        "hindi": "Reply in Hindi.",
+        "hinglish": (
+            "HARD LANGUAGE LOCK: reply in Hindi-dominant code-mix. Hindi words MUST be written in Devanagari script. "
+            "Keep brand names or necessary English business words like DHL, MyBill, invoice, line by line in English script. "
+            "NEVER write romanized Hindi such as 'main', 'aap', 'batao', 'kyun', or 'hoon'."
+        ),
+        "hindi": (
+            "HARD LANGUAGE LOCK: reply entirely in Hindi using Devanagari script. "
+            "Do not use romanized Hindi like 'main', 'aap', 'batao', or 'kyun'. "
+            "Keep proper nouns like DHL or MyBill in English script only if needed."
+        ),
         "bengali": "HARD LANGUAGE LOCK: reply entirely in Bengali. First words must already be Bengali.",
     }.get(suggested, f"Reply in {suggested}.")
 
@@ -2743,7 +3138,7 @@ def llm_collections_turn(
                 {"role": "user", "content": user_prompt},
             ],
             response_format={"type": "json_object"},
-            temperature=0.4,
+            **_chat_kwargs(CHAT_MODEL, 0.4),
         )
     except Exception as exc:  # noqa: BLE001
         return "", [], [], f"LLM turn failed: {exc}"
@@ -2790,7 +3185,7 @@ def llm_collections_turn(
                     },
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.1,
+                **_chat_kwargs(CHAT_MODEL, 0.1),
             )
             if retry.usage:
                 usage_events.append(retry.usage)
@@ -2821,7 +3216,7 @@ def llm_collections_turn(
                     {"role": "user", "content": "Your previous reply contained Hinglish/Hindi words. Rewrite the same reply 100% in English. Keep all facts and intent identical. Return JSON in the same schema."},
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.2,
+                **_chat_kwargs(CHAT_MODEL, 0.2),
             )
             if retry.usage:
                 usage_events.append(retry.usage)
@@ -2899,7 +3294,7 @@ def reply_violates_english_lock(text: str) -> bool:
         return False
     if _DEVANAGARI_RE.search(text) or _BENGALI_SCRIPT_RE.search(text):
         return True
-    return bool(_HINGLISH_LOCK_TOKENS.search(text))
+    return bool(ROMANIZED_INDIC_TOKEN_RE.search(text))
 
 
 def scrub_forbidden_payment_methods(text: str) -> str:
@@ -3025,6 +3420,16 @@ def run_chat_agent_turn(
     language_advice: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[Any], str | None]:
     del coaching_hints
+    if POLICY_ENGINE_MODE != "llm":
+        text, tools_log, model = generate_collections_reply(
+            messages=messages,
+            account_number=account_number,
+            voice=voice,
+            language_advice=language_advice,
+        )
+        if text or POLICY_ENGINE_MODE == "deterministic":
+            return text, tools_log, [], None
+
     text, tools_log, usage_events, error = llm_collections_turn(
         messages=messages,
         account_number=account_number,
@@ -3170,6 +3575,7 @@ ensure_state()
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
+sock = Sock(app)
 
 if KEEP_ALIVE_AVAILABLE:
     try:
@@ -3186,7 +3592,7 @@ def health():
             "ok": True,
             "time": utc_now_iso(),
             "realtime_model": REALTIME_MODEL,
-            "supervisor_model": DETERMINISTIC_SUPERVISOR_MODEL,
+            "supervisor_model": SUPERVISOR_MODEL,
             "has_openai_key": bool(OPENAI_API_KEY),
         }
     )
@@ -3211,15 +3617,51 @@ def bootstrap():
         "board": load_board(),
         "costs": ledger_with_combined(load_ledger()),
         "config": {
-            "realtime_model": REALTIME_MODEL,
-            "supported_realtime_models": supported_realtime_models_payload(),
+            "tts_provider": "sarvam",
+            "stt_provider": "sarvam",
+            "tts_model": SARVAM_TTS_MODEL,
+            "stt_model": SARVAM_STT_MODEL,
+            "realtime_model": SARVAM_TTS_MODEL,  # legacy key kept for frontend cost panel
+            "supported_realtime_models": [
+                {"id": SARVAM_TTS_MODEL, "label": f"Sarvam Bulbul ({SARVAM_TTS_MODEL})"},
+            ],
             "realtime_voice": DEFAULT_REALTIME_VOICE,
-            "transcription_model": REALTIME_TRANSCRIPTION_MODEL,
-            "supervisor_model": DETERMINISTIC_SUPERVISOR_MODEL,
-            "language_coach_model": DETERMINISTIC_LANGUAGE_COACH_MODEL,
-            "chat_model": DETERMINISTIC_CHAT_MODEL,
+            "transcription_model": SARVAM_STT_MODEL,
+            "supervisor_model": SUPERVISOR_MODEL,
+            "language_coach_model": LANGUAGE_COACH_MODEL,
+            "chat_model": CHAT_MODEL,
             "default_language_id": DEFAULT_LANGUAGE_ID,
             "supported_languages": supported_languages_payload(),
+            "sarvam_voices": deepcopy(SARVAM_VOICES),
+            "sarvam_language_codes": dict(SARVAM_LANGUAGE_CODES),
+            "pricing_reference": {
+                "openai_currency": "USD",
+                "sarvam": {
+                    "currency": "INR",
+                    "inr_per_usd": SARVAM_INR_PER_USD,
+                    "tts_inr_per_10k_chars": {
+                        "bulbul:v3": SARVAM_BULBUL_V3_INR_PER_10K_CHARS,
+                        "bulbul:v2": SARVAM_BULBUL_V2_INR_PER_10K_CHARS,
+                        "bulbul:v1": SARVAM_BULBUL_V2_INR_PER_10K_CHARS,
+                    },
+                    "stt_inr_per_hour": {
+                        "saaras:v3": SARVAM_STT_INR_PER_HOUR,
+                        "saarika:v2.5": SARVAM_STT_INR_PER_HOUR,
+                        "saarika:v2": SARVAM_STT_INR_PER_HOUR,
+                    },
+                },
+            },
+            "tts_sample_rate": SARVAM_TTS_SAMPLE_RATE,
+            "stt_sample_rate": SARVAM_STT_SAMPLE_RATE,
+            "stt_mode": SARVAM_STT_MODE,
+            "sarvam_voice_preset": {
+                "id": f"{DEFAULT_REALTIME_VOICE}-collections",
+                "speaker": DEFAULT_REALTIME_VOICE,
+                "pace": SARVAM_TTS_PACE,
+                "temperature": SARVAM_TTS_TEMPERATURE,
+                "sample_rate": SARVAM_TTS_SAMPLE_RATE,
+                "codec": SARVAM_TTS_OUTPUT_CODEC,
+            },
         },
     }
     return success_json(payload)
@@ -3240,67 +3682,584 @@ def invoices_route(account_number: str):
 
 @app.post("/api/session")
 def create_session():
-    if not OPENAI_API_KEY:
-        return error_json("OPENAI_API_KEY is missing on the backend.", 500)
+    """Issue a Sarvam-backed voice session. The frontend then opens
+    /api/tts/stream and /api/stt/stream WebSockets using this session_id.
+    No client secret leaves the backend — the Sarvam API key stays server-side.
+    """
+    if not SARVAM_API_KEY:
+        return error_json("SARVAM_API_KEY is missing on the backend.", 500)
 
     body = request.get_json(silent=True) or {}
     voice = str(body.get("voice") or DEFAULT_REALTIME_VOICE)
-    instructions = REALTIME_RENDERER_INSTRUCTIONS
-    model = str(body.get("model") or REALTIME_MODEL)
+    if voice.lower() not in VOICE_PERSONAS:
+        voice = DEFAULT_REALTIME_VOICE
     language_id = str(body.get("language_id") or DEFAULT_LANGUAGE_ID)
 
-    session_payload = {
-        "session": {
-            "type": "realtime",
-            "model": model,
-            "instructions": instructions,
-            "audio": {
-                "input": {
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.6,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 700,
-                        "create_response": False,
-                        "interrupt_response": True,
-                    },
-                    "noise_reduction": {"type": "near_field"},
-                    "transcription": build_transcription_config(language_id),
-                },
-                "output": {"voice": voice},
-            },
+    return success_json(
+        {
+            "session_id": uuid.uuid4().hex,
+            "voice": voice,
+            "language_id": language_id,
+            "language_code": sarvam_language_code(language_id),
+            "tts_language_code": sarvam_language_code(language_id),
+            "stt_language_code": sarvam_stt_language_code(language_id),
+            "tts_ws_path": "/api/tts/stream",
+            "stt_ws_path": "/api/stt/stream",
+            "tts_sample_rate": SARVAM_TTS_SAMPLE_RATE,
+            "stt_sample_rate": SARVAM_STT_SAMPLE_RATE,
+            "tts_model": SARVAM_TTS_MODEL,
+            "stt_model": SARVAM_STT_MODEL,
+            "stt_mode": SARVAM_STT_MODE,
         }
-    }
-
-    response = requests.post(
-        f"{OPENAI_BASE_URL}/realtime/client_secrets",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=session_payload,
-        timeout=30,
     )
 
-    if not response.ok:
-        return error_json(
-            f"Realtime session creation failed: {response.status_code} {response.text}",
-            502,
-        )
 
-    data = response.json()
-    normalized = {
-        "client_secret": {
-            "value": data.get("value") or data.get("client_secret", {}).get("value"),
-            "expires_at": data.get("expires_at") or data.get("client_secret", {}).get("expires_at"),
+def _sarvam_tts_rest(text: str, voice: str, language_code: str) -> bytes:
+    """Synchronous REST fallback: returns encoded audio bytes from Bulbul v3.
+    Used when streaming WS proxy is unavailable or for short utterances.
+    """
+    if not SARVAM_API_KEY:
+        raise RuntimeError("SARVAM_API_KEY missing")
+    resp = requests.post(
+        f"{SARVAM_BASE_URL}/text-to-speech",
+        headers={
+            "api-subscription-key": SARVAM_API_KEY,
+            "Content-Type": "application/json",
         },
-        "session": data.get("session", {}),
-        "model": model,
-        "voice": voice,
-        "transcription_model": REALTIME_TRANSCRIPTION_MODEL,
-        "language_id": language_id,
+        json={
+            "inputs": [text],
+            **sarvam_tts_options(language_code, voice),
+            "output_audio_codec": SARVAM_TTS_OUTPUT_CODEC,
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"Sarvam TTS REST failed {resp.status_code}: {resp.text[:300]}")
+    data = resp.json()
+    audios = data.get("audios") or []
+    if not audios:
+        raise RuntimeError("Sarvam TTS REST returned no audio")
+    # API returns base64 WAV (with header) per utterance.
+    return base64.b64decode(audios[0])
+
+
+@sock.route("/api/tts/stream")
+def tts_stream(ws):
+    """Browser <-> backend WS for streaming TTS, proxying Sarvam Bulbul WS.
+
+    Browser -> backend (JSON text frames):
+      {"type": "hello", "session_id": "...", "voice": "...", "language_code": "..."}
+      {"type": "speak", "text": "...", "language_code": "...optional override...",
+       "utterance_id": "...optional..."}
+      {"type": "cancel"}        # barge-in: drop any buffered audio
+
+    Backend -> browser:
+      {"type": "ready"}
+      {"type": "audio_start", "utterance_id": "...", "sample_rate": 24000, "format": "pcm_s16le"}
+      <binary frame: int16 little-endian PCM chunk>
+      ... (multiple chunks) ...
+      {"type": "audio_end", "utterance_id": "...", "chars": N}
+      {"type": "error", "message": "..."}
+    """
+    if not SARVAM_API_KEY:
+        ws.send(json.dumps({"type": "error", "message": "SARVAM_API_KEY missing on backend"}))
+        return
+    if not WEBSOCKET_CLIENT_AVAILABLE:
+        ws.send(json.dumps({"type": "error", "message": "websocket-client not installed"}))
+        return
+
+    state: dict[str, Any] = {
+        "session_id": None,
+        "voice": DEFAULT_REALTIME_VOICE,
+        "language_code": "hi-IN",
+        "current_upstream": None,
+        "current_serial": 0,
+        "current_utterance_id": None,
+        "current_chars": 0,
+        "stop": False,
     }
-    return success_json(normalized)
+    upstream_lock = threading.Lock()
+
+    def open_upstream(language_code: str, voice: str) -> Any:
+        url = f"{SARVAM_TTS_WS_URL}?{urlencode({'model': SARVAM_TTS_MODEL, 'send_completion_event': str(SARVAM_TTS_SEND_COMPLETION_EVENT).lower()})}"
+        upstream = ws_client.create_connection(
+            url,
+            header=[f"api-subscription-key: {SARVAM_API_KEY}"],
+            timeout=15,
+        )
+        upstream.send(json.dumps({
+            "type": "config",
+            "data": {
+                **sarvam_tts_options(language_code, voice),
+                "speech_sample_rate": str(SARVAM_TTS_SAMPLE_RATE),
+                "min_buffer_size": SARVAM_TTS_MIN_BUFFER_SIZE,
+                "max_chunk_length": SARVAM_TTS_MAX_CHUNK_LENGTH,
+                "output_audio_codec": SARVAM_TTS_OUTPUT_CODEC,
+                "output_audio_bitrate": SARVAM_TTS_OUTPUT_BITRATE,
+            },
+        }))
+        return upstream
+
+    def close_upstream(upstream: Any | None) -> None:
+        if upstream is None:
+            return
+        try:
+            upstream.close()
+        except Exception:
+            pass
+
+    def relay_upstream(upstream: Any, utterance_id: str, chars: int, serial: int) -> None:
+        sent_audio = False
+        sent_end = False
+        try:
+            while not state["stop"]:
+                try:
+                    raw = upstream.recv()
+                except Exception:
+                    break
+                if not raw:
+                    break
+                try:
+                    payload = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
+                except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+                with upstream_lock:
+                    if serial != state["current_serial"] or state["current_upstream"] is not upstream:
+                        return
+
+                ptype = str(payload.get("type") or "")
+                data = payload.get("data") or {}
+                event_type = str(data.get("event_type") or payload.get("event_type") or "").lower()
+
+                if ptype == "audio":
+                    b64 = data.get("audio") or ""
+                    if not b64:
+                        continue
+                    try:
+                        pcm_bytes = base64.b64decode(b64)
+                    except Exception:
+                        continue
+                    sent_audio = True
+                    try:
+                        ws.send(pcm_bytes)
+                    except Exception:
+                        return
+                    continue
+
+                if ptype == "error":
+                    msg = data.get("message") or "Sarvam upstream error"
+                    try:
+                        ws.send(json.dumps({"type": "error", "message": str(msg)[:300]}))
+                    except Exception:
+                        pass
+                    return
+
+                if ptype in {"event", "completion", "completed", "done"} or event_type in {
+                    "completion",
+                    "completed",
+                    "done",
+                    "finish",
+                    "finished",
+                }:
+                    try:
+                        ws.send(json.dumps({"type": "audio_end", "utterance_id": utterance_id, "chars": chars}))
+                    except Exception:
+                        pass
+                    sent_end = True
+                    return
+        finally:
+            close_upstream(upstream)
+            with upstream_lock:
+                still_active = serial == state["current_serial"] and state["current_upstream"] is upstream
+                if still_active:
+                    state["current_upstream"] = None
+                    state["current_utterance_id"] = None
+                    state["current_chars"] = 0
+            if sent_audio and not sent_end and still_active:
+                try:
+                    ws.send(json.dumps({"type": "audio_end", "utterance_id": utterance_id, "chars": chars}))
+                except Exception:
+                    pass
+
+    ws.send(json.dumps({"type": "ready"}))
+
+    try:
+        while True:
+            try:
+                raw = ws.receive(timeout=120)
+            except Exception:
+                return
+            if raw is None:
+                return
+            try:
+                msg = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            msg_type = msg.get("type")
+
+            if msg_type == "hello":
+                state["session_id"] = str(msg.get("session_id") or "")
+                voice = str(msg.get("voice") or DEFAULT_REALTIME_VOICE)
+                if voice.lower() in VOICE_PERSONAS:
+                    state["voice"] = voice
+                state["language_code"] = str(msg.get("language_code") or "hi-IN")
+                continue
+
+            if msg_type == "cancel":
+                with upstream_lock:
+                    upstream = state["current_upstream"]
+                    state["current_serial"] += 1
+                    state["current_upstream"] = None
+                    state["current_utterance_id"] = None
+                    state["current_chars"] = 0
+                close_upstream(upstream)
+                ws.send(json.dumps({"type": "cancelled"}))
+                continue
+
+            if msg_type == "speak":
+                text = str(msg.get("text") or "").strip()
+                if not text:
+                    continue
+                language_code = str(msg.get("language_code") or state["language_code"])
+                speech_text = prepare_sarvam_tts_text(text, language_code)
+                if not speech_text:
+                    continue
+                utterance_id = str(msg.get("utterance_id") or uuid.uuid4().hex[:10])
+                state["language_code"] = language_code
+                with upstream_lock:
+                    previous_upstream = state["current_upstream"]
+                    state["current_serial"] += 1
+                    serial = state["current_serial"]
+                    state["current_upstream"] = None
+                    state["current_utterance_id"] = utterance_id
+                    state["current_chars"] = len(speech_text)
+                close_upstream(previous_upstream)
+                try:
+                    upstream = open_upstream(language_code, state["voice"])
+                except Exception as exc:  # noqa: BLE001
+                    ws.send(json.dumps({"type": "error", "message": f"Sarvam TTS connect failed: {str(exc)[:200]}"}))
+                    continue
+                with upstream_lock:
+                    if serial != state["current_serial"]:
+                        close_upstream(upstream)
+                        continue
+                    state["current_upstream"] = upstream
+                relay_thread = threading.Thread(
+                    target=relay_upstream,
+                    args=(upstream, utterance_id, len(speech_text), serial),
+                    daemon=True,
+                )
+                relay_thread.start()
+
+                ws.send(json.dumps({
+                    "type": "audio_start",
+                    "utterance_id": utterance_id,
+                    "sample_rate": SARVAM_TTS_SAMPLE_RATE,
+                    "format": SARVAM_TTS_STREAM_FORMAT,
+                }))
+                try:
+                    upstream.send(json.dumps({"type": "text", "data": {"text": speech_text}}))
+                    upstream.send(json.dumps({"type": "flush"}))
+                except Exception as exc:  # noqa: BLE001
+                    ws.send(json.dumps({"type": "error", "message": f"Sarvam TTS send failed: {str(exc)[:200]}"}))
+                    close_upstream(upstream)
+                    continue
+                try:
+                    record_sarvam_tts_usage(
+                        chars=len(speech_text),
+                        event_id=f"tts_{utterance_id}",
+                        session_id=state.get("session_id") or None,
+                    )
+                except Exception:
+                    pass
+                continue
+    finally:
+        state["stop"] = True
+        with upstream_lock:
+            upstream = state["current_upstream"]
+            state["current_upstream"] = None
+        close_upstream(upstream)
+
+
+@sock.route("/api/stt/stream")
+def stt_stream(ws):
+    """Browser <-> backend WS for streaming STT, proxying Sarvam Saarika WS.
+
+    Browser -> backend:
+      {"type": "hello", "session_id": "...", "language_code": "hi-IN",
+       "sample_rate": 16000}
+      <binary frame: int16 PCM little-endian mono @ sample_rate>
+      {"type": "flush"}     # ask Sarvam to emit a final ASAP
+      {"type": "discard"}   # drop buffered audio (too short to be speech)
+      {"type": "stop"}
+
+    Backend -> browser:
+      {"type": "ready"}
+      {"type": "partial", "text": "..."}
+      {"type": "final", "text": "...", "language_code": "hi-IN"}
+      {"type": "error", "message": "..."}
+    """
+    if not SARVAM_API_KEY:
+        ws.send(json.dumps({"type": "error", "message": "SARVAM_API_KEY missing on backend"}))
+        return
+    if not WEBSOCKET_CLIENT_AVAILABLE:
+        ws.send(json.dumps({"type": "error", "message": "websocket-client not installed"}))
+        return
+
+    state: dict[str, Any] = {
+        "session_id": None,
+        "language_code": sarvam_stt_language_code(DEFAULT_LANGUAGE_ID),
+        "sample_rate": SARVAM_STT_SAMPLE_RATE,
+        "upstream": None,
+        "audio_seconds_unbilled": 0.0,
+        "stop": False,
+    }
+    upstream_lock = threading.Lock()
+    pump_thread: threading.Thread | None = None
+
+    def close_upstream(upstream: Any | None) -> None:
+        if upstream is None:
+            return
+        try:
+            upstream.close()
+        except Exception:
+            pass
+
+    def reset_upstream(expected: Any | None = None, *, reset_billing: bool = False) -> None:
+        with upstream_lock:
+            upstream = state["upstream"]
+            if expected is not None and upstream is not expected:
+                upstream = None
+            else:
+                state["upstream"] = None
+        if reset_billing:
+            state["audio_seconds_unbilled"] = 0.0
+        close_upstream(upstream)
+
+    def open_upstream() -> Any:
+        def _connect(language_code: str) -> Any:
+            params = urlencode({
+                "language-code": language_code or "unknown",
+                "model": SARVAM_STT_MODEL,
+                "mode": SARVAM_STT_MODE,
+                "sample_rate": state["sample_rate"],
+                "input_audio_codec": "pcm_s16le",
+                "flush_signal": "true",
+            })
+            url = f"{SARVAM_STT_WS_URL}?{params}"
+            return ws_client.create_connection(
+                url,
+                header=[f"Api-Subscription-Key: {SARVAM_API_KEY}"],
+                timeout=15,
+            )
+
+        language_code = state["language_code"] or "unknown"
+        try:
+            return _connect(language_code)
+        except Exception:
+            if language_code != "unknown":
+                raise
+            return _connect(sarvam_language_code(DEFAULT_LANGUAGE_ID))
+
+    def ensure_upstream() -> Any:
+        nonlocal pump_thread
+        with upstream_lock:
+            upstream = state["upstream"]
+        if upstream is None:
+            upstream = open_upstream()
+            with upstream_lock:
+                current = state["upstream"]
+                if current is None:
+                    state["upstream"] = upstream
+                else:
+                    close_upstream(upstream)
+                    upstream = current
+        if pump_thread is None or not pump_thread.is_alive():
+            pump_thread = threading.Thread(target=upstream_pump, daemon=True)
+            pump_thread.start()
+        return upstream
+
+    def upstream_pump():
+        while not state["stop"]:
+            with upstream_lock:
+                upstream = state["upstream"]
+            if upstream is None:
+                time.sleep(0.05)
+                continue
+            try:
+                raw = upstream.recv()
+            except Exception:
+                reset_upstream(upstream)
+                continue
+            if not raw:
+                reset_upstream(upstream)
+                continue
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
+            except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            ptype = payload.get("type")
+            data = payload.get("data") or {}
+            # Saarika WS shape (validated against avr-asr-sarvam + Sarvam docs):
+            #   {"type":"data","data":{"transcript":"...","language_code":"hi-IN"}}
+            #   {"type":"error","data":{"message":"..."}}
+            # Also tolerate alternative shapes some Saarika versions emit.
+            text = (
+                data.get("transcript")
+                or payload.get("transcript")
+                or payload.get("text")
+                or ""
+            ).strip()
+            detected = (
+                data.get("language_code")
+                or payload.get("language_code")
+                or payload.get("detected_language_code")
+                or state["language_code"]
+                or "hi-IN"
+            )
+            if ptype == "error":
+                msg = data.get("message") or "Sarvam STT upstream error"
+                try:
+                    ws.send(json.dumps({"type": "error", "message": str(msg)[:300]}))
+                except Exception:
+                    return
+                reset_upstream(upstream)
+                continue
+            if ptype in {"partial", "interim"} and text:
+                try:
+                    ws.send(json.dumps({"type": "partial", "text": text, "language_code": detected}))
+                except Exception:
+                    return
+                continue
+            # Treat data/transcript/final as a committed transcript.
+            if ptype in {"data", "transcript", "final"} and text:
+                if not is_stt_hallucination(text):
+                    try:
+                        ws.send(json.dumps({"type": "final", "text": text, "language_code": detected}))
+                    except Exception:
+                        return
+                # Bill accumulated seconds when we get a final.
+                seconds = state["audio_seconds_unbilled"]
+                state["audio_seconds_unbilled"] = 0.0
+                if seconds > 0:
+                    try:
+                        record_sarvam_stt_usage(
+                            seconds=seconds,
+                            event_id=f"stt_{uuid.uuid4().hex[:10]}",
+                            session_id=state.get("session_id") or None,
+                        )
+                    except Exception:
+                        pass
+    ws.send(json.dumps({"type": "ready"}))
+
+    try:
+        while True:
+            try:
+                raw = ws.receive(timeout=120)
+            except Exception:
+                return
+            if raw is None:
+                return
+
+            if isinstance(raw, (bytes, bytearray)):
+                chunk_seconds = len(raw) / (2 * max(state["sample_rate"], 1))
+                # Sarvam expects base64-wrapped JSON audio frames.
+                b64 = base64.b64encode(bytes(raw)).decode("ascii")
+                msg = json.dumps({
+                    "audio": {
+                        "data": b64,
+                        "sample_rate": str(state["sample_rate"]),
+                        "encoding": "audio/wav",
+                    }
+                })
+                sent = False
+                for _ in range(2):
+                    try:
+                        upstream = ensure_upstream()
+                    except Exception as exc:  # noqa: BLE001
+                        ws.send(json.dumps({"type": "error", "message": f"Sarvam STT connect failed: {str(exc)[:200]}"}))
+                        break
+                    try:
+                        upstream.send(msg)
+                        state["audio_seconds_unbilled"] += chunk_seconds
+                        sent = True
+                        break
+                    except Exception:
+                        reset_upstream(upstream)
+                continue
+
+            try:
+                msg = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            mtype = msg.get("type")
+            if mtype == "hello":
+                state["session_id"] = str(msg.get("session_id") or "")
+                hinted = str(msg.get("language_code") or "").strip()
+                if hinted:
+                    state["language_code"] = hinted
+                try:
+                    state["sample_rate"] = int(msg.get("sample_rate") or SARVAM_STT_SAMPLE_RATE)
+                except (TypeError, ValueError):
+                    state["sample_rate"] = SARVAM_STT_SAMPLE_RATE
+            elif mtype == "flush":
+                if state["upstream"] is not None:
+                    try:
+                        state["upstream"].send(json.dumps({"type": "flush"}))
+                    except Exception:
+                        reset_upstream(state["upstream"])
+            elif mtype == "discard":
+                # Sarvam has no native discard command. Reset the upstream so a
+                # short/garbled interruption cannot poison the next utterance.
+                reset_upstream(reset_billing=True)
+            elif mtype == "stop":
+                return
+    finally:
+        state["stop"] = True
+        reset_upstream(reset_billing=True)
+
+
+def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
+    """Wrap raw int16 PCM in a minimal RIFF/WAV header."""
+    import struct
+
+    num_samples = len(pcm) // 2
+    byte_rate = sample_rate * 2
+    block_align = 2
+    data_size = num_samples * 2
+    riff_size = 36 + data_size
+    header = b"RIFF" + struct.pack("<I", riff_size) + b"WAVE"
+    header += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, byte_rate, block_align, 16)
+    header += b"data" + struct.pack("<I", data_size)
+    return header + pcm
+
+
+def _sarvam_stt_rest(pcm: bytes, sample_rate: int, language_code: str) -> tuple[str, str]:
+    """Returns (transcript, detected_language_code). Uses Saarika auto-detect
+    so the customer can switch languages mid-call without us forcing hi-IN."""
+    if not SARVAM_API_KEY:
+        raise RuntimeError("SARVAM_API_KEY missing")
+    wav_bytes = _pcm_to_wav(pcm, sample_rate)
+    files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+    data = {
+        # "unknown" lets Saarika detect English vs Indic vs Hinglish per utterance.
+        "language_code": "unknown",
+        "model": SARVAM_STT_MODEL,
+    }
+    resp = requests.post(
+        f"{SARVAM_BASE_URL}/speech-to-text",
+        headers={"api-subscription-key": SARVAM_API_KEY},
+        files=files,
+        data=data,
+        timeout=30,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"Sarvam STT failed {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    transcript = str(payload.get("transcript") or "").strip()
+    detected = str(payload.get("language_code") or language_code or "hi-IN").strip()
+    return transcript, detected
 
 
 @app.post("/api/tool/<tool_name>")
@@ -3335,9 +4294,17 @@ def call_log():
 @app.post("/api/chat/turn")
 def chat_turn():
     payload = request.get_json(silent=True) or {}
-    messages = payload.get("messages") or []
-    if not isinstance(messages, list):
+    raw_messages = payload.get("messages") or []
+    if not isinstance(raw_messages, list):
         return error_json("messages must be a list of {role, text} entries.")
+    transcript_text = str(payload.get("transcript") or "").strip()
+    if not transcript_text:
+        for entry in reversed(raw_messages):
+            if isinstance(entry, dict) and str(entry.get("role") or "") == "customer":
+                transcript_text = str(entry.get("text") or "").strip()
+                if transcript_text:
+                    break
+    messages = collapse_trailing_customer_messages(raw_messages, transcript_text)
     account_number = str(payload.get("account_number") or DEFAULT_ACCOUNT_ID)
     voice = str(payload.get("voice") or DEFAULT_REALTIME_VOICE)
 
@@ -3602,6 +4569,16 @@ def metrics_cost_event():
         return success_json(record_agent_response_usage(model, usage, event_id=event_id, session_id=session_id))
     if source == "agent" and usage_type == "transcription":
         return success_json(record_agent_transcription_usage(usage, event_id=event_id, session_id=session_id))
+    if source == "sarvam" and usage_type == "tts":
+        chars = int(payload.get("chars", 0) or usage.get("chars", 0) or 0)
+        return success_json(
+            record_sarvam_tts_usage(chars=chars, event_id=event_id, session_id=session_id, model=model)
+        )
+    if source == "sarvam" and usage_type == "stt":
+        seconds = float(payload.get("seconds", 0.0) or usage.get("seconds", 0.0) or 0.0)
+        return success_json(
+            record_sarvam_stt_usage(seconds=seconds, event_id=event_id, session_id=session_id, model=model)
+        )
     if source == "supervisor":
         return success_json(record_supervisor_usage(model, usage))
     if source == "language_coach":

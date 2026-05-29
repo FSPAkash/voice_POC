@@ -660,6 +660,39 @@ button {
   line-height: 1.45;
 }
 
+.pricing-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.pricing-section {
+  display: grid;
+  gap: 8px;
+}
+
+.pricing-section__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pricing-section__head > span:last-child {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.pricing-note {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  padding: 9px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .realtime-rate-grid {
   display: grid;
   gap: 8px;
@@ -1137,6 +1170,28 @@ button {
 
 .cost-block__head small {
   display: none;
+}
+
+.cost-strip--side {
+  grid-template-columns: 1fr;
+}
+
+.cost-strip--side .cost-block__head {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.cost-strip--side .cost-block__head small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-family: var(--mono);
+}
+
+.cost-strip--side .cost-block__meta {
+  flex-wrap: wrap;
+  white-space: normal;
 }
 
 .cost-block__value {

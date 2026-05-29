@@ -222,18 +222,18 @@ Agent speech length is one of the biggest controllable variables. The table belo
 
 ## 7. Volume Projection
 
-Projection assumes 1,000 calls/day, 30,000 calls/month, and 365,000 calls/year.
+Projection assumes 100,000 calls/month, approximately 3,333 calls/day, and 1,200,000 calls/year.
 
 | Option | $/call | Daily | Monthly | Annual |
 |---|---:|---:|---:|---:|
-| A | $0.186 | $186 | $5,584 | $67,934 |
-| A-Optimized | $0.098 | $98 | $2,946 | $35,837 |
-| B | $0.358 | $358 | $10,733 | $130,582 |
-| C | $0.300 | $300 | $9,010 | $109,617 |
-| C-Optimized | $0.212 | $212 | $6,372 | $77,520 |
-| D | $0.212 | $212 | $6,362 | $77,402 |
-| E | $0.480 | $480 | $14,410 | $175,317 |
-| F | $0.342 | $342 | $10,250 | $124,706 |
+| A | $0.186 | $620 | $18,612 | $223,344 |
+| A-Optimized | $0.098 | $327 | $9,818 | $117,821 |
+| B | $0.358 | $1,193 | $35,776 | $429,312 |
+| C | $0.300 | $1,001 | $30,032 | $360,384 |
+| C-Optimized | $0.212 | $708 | $21,238 | $254,861 |
+| D | $0.212 | $707 | $21,206 | $254,472 |
+| E | $0.480 | $1,601 | $48,032 | $576,384 |
+| F | $0.342 | $1,139 | $34,166 | $409,992 |
 
 ---
 

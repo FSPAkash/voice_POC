@@ -23,8 +23,8 @@ def split_table_row(line: str) -> list[str]:
 
 
 def is_table_divider(line: str) -> bool:
-    stripped = line.strip().strip("|").replace(" ", "")
-    return bool(stripped) and all(ch in "-:" for ch in stripped)
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return bool(cells) and all(cell and all(ch in "-:" for ch in cell) for cell in cells)
 
 
 def add_table(doc: Document, lines: list[str]) -> None:

@@ -29,7 +29,6 @@ import {
 import { formatCurrency, formatDate, formatNumber, formatTime, formatUsd } from './lib/format'
 import {
   buildScriptedResponse,
-  buildOpeningResponse,
   buildOpeningText,
   buildSessionUpdate,
   detectLanguageComplianceIssue,
@@ -37,6 +36,15 @@ import {
   extractRealtimeFunctionCalls,
   extractRealtimeText,
 } from './lib/realtime'
+import { SarvamVoiceClient, type SarvamSessionConfig } from './lib/sarvam'
+
+// Extract "LINE TO SPEAK (verbatim): xxx" payload from buildScriptedResponse output.
+function extractSpokenLine(event: Record<string, unknown>): string {
+  const response = (event.response as Record<string, unknown>) || {}
+  const instructions = String(response.instructions || '')
+  const match = instructions.match(/LINE TO SPEAK \(verbatim\):\s*([\s\S]+?)$/)
+  return (match ? match[1] : '').trim()
+}
 import type {
   BootstrapResponse,
   CallDisposition,
@@ -52,6 +60,13 @@ import type {
 type CallState = 'loading' | 'ready' | 'starting' | 'connected' | 'ending' | 'error'
 type TabId = 'call' | 'wrap' | 'supervisor'
 type InteractionMode = 'voice' | 'chat'
+type PricingCard = {
+  id: string
+  title: string
+  model: string
+  lines: string[]
+  active?: boolean
+}
 
 type CallRecord = {
   id: string
@@ -67,13 +82,28 @@ type CallRecord = {
   summary: CallSummary | null
 }
 
+function formatInrRate(amount: number): string {
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount)
+}
+
+function formatUsdRate(amount: number): string {
+  return `$${amount.toFixed(2)}`
+}
+
 type CostEventPayload = {
   event_id: string
   session_id: string
-  source: 'agent' | 'supervisor' | 'language_coach'
-  usage_type: 'response' | 'transcription'
+  source: 'agent' | 'supervisor' | 'language_coach' | 'sarvam'
+  usage_type: 'response' | 'transcription' | 'tts' | 'stt'
   model: string
   usage: Record<string, unknown>
+  chars?: number
+  seconds?: number
 }
 
 type AgentActivityEntry = {
@@ -85,8 +115,8 @@ type AgentActivityEntry = {
 }
 
 const AGENT_NODES: { id: AgentActivityEntry['agent']; label: string; model: string; idle: string }[] = [
-  { id: 'caller', label: 'Live Caller', model: 'gpt-realtime', idle: 'Idle — voice mode only' },
-  { id: 'chat_agent', label: 'Chat Agent', model: 'gpt-4.1-mini', idle: 'Idle — text mode only' },
+  { id: 'caller', label: 'Live Caller', model: 'bulbul:v3 + saaras:v3', idle: 'Idle — voice mode only' },
+  { id: 'chat_agent', label: 'Chat Agent', model: 'gpt-4.1 + deterministic fallback', idle: 'Idle — text mode only' },
   { id: 'language_coach', label: 'Language Coach', model: 'rule-based', idle: 'Awaiting customer turn' },
   { id: 'supervisor', label: 'Supervisor', model: 'rule-based', idle: 'Awaiting agent turn' },
   { id: 'tool', label: 'Tool Layer', model: 'mock SAP', idle: 'No tool calls yet' },
@@ -158,7 +188,7 @@ function agentLabel(id: AgentActivityEntry['agent']): string {
 function emptyCosts(): CostState {
   return {
     agent: {
-      model: 'gpt-realtime-mini',
+      model: 'bulbul:v3',
       events: 0,
       response_usage: {
         text_input_tokens: 0,
@@ -170,7 +200,7 @@ function emptyCosts(): CostState {
         estimated_cost_usd: 0,
       },
       transcription_usage: {
-        model: 'gpt-4o-mini-transcribe',
+        model: 'saaras:v3',
         audio_input_tokens: 0,
         text_input_tokens: 0,
         text_output_tokens: 0,
@@ -180,7 +210,7 @@ function emptyCosts(): CostState {
       estimated_cost_usd: 0,
     },
     supervisor: {
-      model: 'gpt-4.1-mini',
+      model: 'deterministic-call-engine',
       events: 0,
       text_input_tokens: 0,
       text_cached_input_tokens: 0,
@@ -189,7 +219,7 @@ function emptyCosts(): CostState {
       estimated_cost_usd: 0,
     },
     language_coach: {
-      model: 'gpt-4.1-mini',
+      model: 'gpt-4.1',
       events: 0,
       text_input_tokens: 0,
       text_cached_input_tokens: 0,
@@ -346,7 +376,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const [micLevel, setMicLevel] = useState(0)
   const [selectedLanguageId, setSelectedLanguageId] = useState('hinglish')
   const [activeLanguageId, setActiveLanguageId] = useState('hinglish')
-  const [selectedRealtimeModel, setSelectedRealtimeModel] = useState('gpt-realtime-mini')
+  const [selectedRealtimeModel, setSelectedRealtimeModel] = useState('bulbul:v3')
   const [languageAdvice, setLanguageAdvice] = useState<LanguageAdvice>(defaultLanguageAdvice)
   const [callSummary, setCallSummary] = useState<CallSummary | null>(null)
   const [summarizing, setSummarizing] = useState(false)
@@ -402,8 +432,20 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null)
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
-  const dataChannelRef = useRef<RTCDataChannel | null>(null)
+  const sarvamClientRef = useRef<SarvamVoiceClient | null>(null)
+  const sarvamSessionRef = useRef<SarvamSessionConfig | null>(null)
+  // Turn-commit debounce: buffer rapid fragments from STT into one logical
+  // customer turn before firing the policy engine. Keep this short so the call
+  // never feels dropped between the customer's turn and the agent response.
+  const turnCommitTimerRef = useRef<number | null>(null)
+  const turnCommitBufferRef = useRef<string[]>([])
+  const turnCommitDelayMs = 250
+  const pendingBargeInRef = useRef<{ responseId: string; at: number } | null>(null)
+  const policyReplyRequestSeqRef = useRef(0)
+  // Wall-clock timestamp of the most recent agent audio_start. Used to detect
+  // self-echo hallucinations: very short transcripts arriving immediately
+  // after playback begins are usually not real customer speech.
+  const lastAgentSpeakStartRef = useRef<number | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -432,7 +474,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const callStateRef = useRef<CallState>('loading')
   const selectedLanguageRef = useRef('hinglish')
   const activeLanguageRef = useRef('hinglish')
-  const selectedRealtimeModelRef = useRef('gpt-realtime-mini')
+  const selectedRealtimeModelRef = useRef('bulbul:v3')
   const languageAdviceRef = useRef<LanguageAdvice>(defaultLanguageAdvice())
   const coachingHintsRef = useRef<string[]>([])
   const pendingCostEventsRef = useRef<Map<string, CostEventPayload>>(
@@ -620,7 +662,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const getStageLine = () => {
     if (callState === 'loading') return 'Loading local demo configuration'
     if (callState === 'error') return errorMessage || 'Call needs attention'
-    if (callState === 'starting') return 'Connecting to OpenAI Realtime'
+    if (callState === 'starting') return 'Connecting voice session'
     if (callState === 'ending') return 'Closing the session'
     if (callState !== 'connected') return 'Click Start Call to dial Mind Your Business Inc.'
     if (customerSpeaking) return 'Customer speaking'
@@ -634,7 +676,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
     costsRef.current = payload.costs
     setCosts(payload.costs)
     const defaultLanguageId = payload.config.default_language_id ?? 'hinglish'
-    const defaultRealtimeModel = payload.config.realtime_model ?? 'gpt-realtime-mini'
+    const defaultRealtimeModel = payload.config.realtime_model ?? 'bulbul:v3'
     setSelectedLanguageId(defaultLanguageId)
     setActiveLanguageId(defaultLanguageId)
     setSelectedRealtimeModel(defaultRealtimeModel)
@@ -796,6 +838,15 @@ export default function App({ username, onLogout }: AppProps = {}) {
     resetAssistantDraft()
   }
 
+  const sealAssistantDraft = () => {
+    const current = assistantBufferRef.current.trim()
+    if (!current) {
+      resetAssistantDraft()
+      return
+    }
+    finalizeAssistantDraft(current)
+  }
+
   const appendCustomerTranscript = (text: string, id?: string) => {
     const normalized = text.trim()
     if (!normalized) return
@@ -853,10 +904,41 @@ export default function App({ username, onLogout }: AppProps = {}) {
     })
   }
 
+  // Shim: original code posted realtime events over an OpenAI WebRTC data
+  // channel. With Sarvam we only need `response.create` (-> speak text) and
+  // `response.cancel` (-> stop playback). `session.update` and other event
+  // types are no-ops; the Sarvam config is set once at connect.
   const sendRealtimeEvent = (event: Record<string, unknown>) => {
-    const channel = dataChannelRef.current
-    if (!channel || channel.readyState !== 'open') return
-    channel.send(JSON.stringify(event))
+    const client = sarvamClientRef.current
+    if (!client) return
+    const type = String(event.type ?? '')
+    if (type === 'response.create') {
+      const line = extractSpokenLine(event)
+      if (!line) return
+      const langCode = sarvamLangCodeFor(activeLanguageRef.current)
+      const utteranceId = client.speak(line, langCode)
+      // Synth the realtime-style created event so the legacy state machine
+      // bookkeeps activeResponseIdRef correctly.
+      void handleRealtimeEvent({
+        type: 'response.created',
+        response: { id: utteranceId, _spoken_text: line },
+      })
+      return
+    }
+    if (type === 'response.cancel') {
+      client.cancelSpeech('app')
+      void handleRealtimeEvent({ type: 'response.cancelled' })
+      return
+    }
+    // session.update etc. — Sarvam handles language per-utterance; ignore.
+  }
+
+  const sarvamLangCodeFor = (languageId: string): string => {
+    const map = bootstrapRef.current?.config.sarvam_language_codes
+    if (map && map[languageId]) return map[languageId]
+    if (languageId === 'english') return 'en-IN'
+    if (languageId === 'bengali') return 'bn-IN'
+    return 'hi-IN'
   }
 
   const flushPendingRealtime = () => {
@@ -946,6 +1028,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
   ) => {
     const snapshot = bootstrapRef.current
     if (!snapshot) return
+    const requestSeq = ++policyReplyRequestSeqRef.current
     setThinking(true)
     pushAgentActivity({
       agent: 'caller',
@@ -966,6 +1049,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         coaching_hints: coachingHintsRef.current.slice(0, 5),
         language_advice: languageAdviceOverride ?? languageAdviceRef.current,
       })
+      if (requestSeq !== policyReplyRequestSeqRef.current) return
       costsRef.current = result.costs
       startTransition(() => setCosts(result.costs))
       applyBackendToolCalls(result.tool_calls)
@@ -988,6 +1072,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         summary: 'No spoken follow-up was needed for this turn',
       })
     } catch (error) {
+      if (requestSeq !== policyReplyRequestSeqRef.current) return
       const message = error instanceof Error ? error.message : 'Backend reply generation failed.'
       appendSystemTranscript(`Call policy error: ${message}`)
       setThinking(false)
@@ -1058,6 +1143,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
     const snapshot = bootstrapRef.current
     if (!snapshot) return
     languageRepairAttemptedRef.current = false
+    const requestSeq = ++policyReplyRequestSeqRef.current
     setThinking(true)
 
     pushAgentActivity({
@@ -1084,6 +1170,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
           .map((entry) => ({ role: entry.role as 'assistant' | 'customer', text: entry.text })),
         coaching_hints: coachingHintsRef.current.slice(0, 5),
       })
+      if (requestSeq !== policyReplyRequestSeqRef.current) return
 
       const nextAdvice = result.advice
       const nextLanguageId = nextAdvice.suggested_language_id || activeLanguageRef.current
@@ -1137,6 +1224,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         summary: 'No spoken follow-up was needed for this turn',
       })
     } catch (error) {
+      if (requestSeq !== policyReplyRequestSeqRef.current) return
       const message = error instanceof Error ? error.message : 'Backend turn failed.'
       appendSystemTranscript(`Call policy error: ${message}`)
       setThinking(false)
@@ -1364,11 +1452,20 @@ export default function App({ username, onLogout }: AppProps = {}) {
         typeof event.response === 'object' && event.response ? (event.response as Record<string, unknown>) : {}
       const id = typeof resp.id === 'string' ? resp.id : null
       if (id) activeResponseIdRef.current = id
+      const spokenText = typeof resp._spoken_text === 'string' ? resp._spoken_text.trim() : ''
+      if (spokenText && !assistantMessageIdRef.current) {
+        upsertAssistantDraft(spokenText)
+      }
       streamingViolationCancelledRef.current = false
       return
     }
     if (eventType === 'response.cancelled' || eventType === 'response.canceled') {
+      if (assistantMessageIdRef.current && assistantBufferRef.current.trim()) {
+        sealAssistantDraft()
+      }
+      pendingBargeInRef.current = null
       activeResponseIdRef.current = null
+      lastAgentSpeakStartRef.current = null
       flushPendingRealtime()
       return
     }
@@ -1410,7 +1507,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
           session_id: costsRef.current.session_id || bootstrapRef.current?.costs.session_id || '',
           source: 'agent',
           usage_type: 'transcription',
-          model: bootstrapRef.current?.config.transcription_model ?? 'gpt-4o-mini-transcribe',
+          model: bootstrapRef.current?.config.transcription_model ?? 'saaras:v3',
           usage: usage as Record<string, unknown>,
         })
       }
@@ -1443,7 +1540,9 @@ export default function App({ username, onLogout }: AppProps = {}) {
       return
     }
     if (eventType === 'response.done') {
+      pendingBargeInRef.current = null
       activeResponseIdRef.current = null
+      lastAgentSpeakStartRef.current = null
       const responsePayload =
         typeof event.response === 'object' && event.response ? (event.response as Record<string, unknown>) : {}
       const usage = responsePayload.usage
@@ -1456,7 +1555,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
           session_id: costsRef.current.session_id || bootstrapRef.current?.costs.session_id || '',
           source: 'agent',
           usage_type: 'response',
-          model: selectedRealtimeModelRef.current || bootstrapRef.current?.config.realtime_model || 'gpt-realtime-mini',
+          model: selectedRealtimeModelRef.current || bootstrapRef.current?.config.realtime_model || 'bulbul:v3',
           usage: usage as Record<string, unknown>,
         })
       }
@@ -1598,10 +1697,16 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
   const closeMediaResources = () => {
     stopMicMeter()
-    dataChannelRef.current?.close()
-    dataChannelRef.current = null
-    peerConnectionRef.current?.close()
-    peerConnectionRef.current = null
+    if (turnCommitTimerRef.current !== null) {
+      window.clearTimeout(turnCommitTimerRef.current)
+      turnCommitTimerRef.current = null
+    }
+    turnCommitBufferRef.current = []
+    pendingBargeInRef.current = null
+    policyReplyRequestSeqRef.current += 1
+    sarvamClientRef.current?.disconnect()
+    sarvamClientRef.current = null
+    sarvamSessionRef.current = null
     localStreamRef.current?.getTracks().forEach((track) => track.stop())
     localStreamRef.current = null
     if (remoteAudioRef.current) {
@@ -1660,92 +1765,190 @@ export default function App({ username, onLogout }: AppProps = {}) {
       startTransition(() => setCosts(resetCosts))
 
       const session = await createRealtimeSession({
-        instructions: snapshot.agent_prompt,
-        model: selectedRealtimeModelRef.current,
         voice: snapshot.config.realtime_voice,
         language_id: selectedLanguageRef.current,
       })
 
-      if (!session.client_secret.value) {
-        throw new Error('Realtime session did not return a client secret.')
+      if (!session.session_id) {
+        throw new Error('Sarvam session did not return a session_id.')
       }
+      sarvamSessionRef.current = session
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
       localStreamRef.current = stream
       startMicMeter(stream)
 
-      const peerConnection = new RTCPeerConnection()
-      peerConnectionRef.current = peerConnection
+      const client = new SarvamVoiceClient()
+      sarvamClientRef.current = client
 
-      stream.getTracks().forEach((track) => peerConnection.addTrack(track, stream))
-
-      peerConnection.ontrack = (trackEvent) => {
-        const [remoteStream] = trackEvent.streams
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream
-          void remoteAudioRef.current.play().catch(() => undefined)
-        }
+      const utteranceTextById = new Map<string, string>()
+      const dispatchSpoken = (utteranceId: string, chars: number) => {
+        // Synthesize a realtime-style `response.done` so the legacy state
+        // machine finalises the assistant draft and triggers supervisor review.
+        const spoken = utteranceTextById.get(utteranceId) ?? ''
+        utteranceTextById.delete(utteranceId)
+        lastAgentSpeakStartRef.current = null
+        void handleRealtimeEvent({
+          type: 'response.done',
+          response: {
+            id: utteranceId,
+            output: [
+              {
+                type: 'message',
+                content: [
+                  { type: 'output_audio_transcript', transcript: spoken },
+                ],
+              },
+            ],
+          },
+        })
+        // Record TTS cost out-of-band.
+        const sessionId = costsRef.current.session_id || bootstrapRef.current?.costs.session_id || ''
+        void applyCostUpdate({
+          event_id: `tts_${utteranceId}`,
+          session_id: sessionId,
+          source: 'sarvam',
+          usage_type: 'tts',
+          model: session.tts_model,
+          usage: {},
+          chars,
+        } as unknown as CostEventPayload)
       }
 
-      const dataChannel = peerConnection.createDataChannel('oai-events')
-      dataChannelRef.current = dataChannel
-      dataChannel.onmessage = (messageEvent) => {
-        try {
-          const payload = JSON.parse(messageEvent.data) as Record<string, unknown>
-          void handleRealtimeEvent(payload)
-        } catch {
-          // Ignore malformed events.
-        }
-      }
-      dataChannel.onopen = () => {
-        startTransition(() => setCallState('connected'))
-        activeResponseIdRef.current = null
-        pendingResponseQueueRef.current = []
-        pendingSessionUpdateRef.current = null
-        sendRealtimeEvent(
-          buildSessionUpdate(
-            snapshot.agent_prompt,
-            snapshot.realtime_tools,
-            snapshot.config.realtime_voice,
-            selectedRealtimeModelRef.current,
-            snapshot.config.transcription_model,
-            snapshot.config.supported_languages,
-            selectedLanguageRef.current,
-          ),
-        )
-        {
-          const openingLang =
-            snapshot.config.supported_languages.find(
-              (l) => l.id === selectedLanguageRef.current,
-            )?.agent_label ?? 'Hinglish'
-          lastApprovedScriptRef.current = buildOpeningText(snapshot.customer, snapshot.agent_persona, openingLang)
-          sendRealtimeEvent(buildOpeningResponse(snapshot.customer, snapshot.agent_persona, openingLang))
-        }
-      }
-      dataChannel.onclose = () => {
-        if (callStateRef.current !== 'ending') {
-          startTransition(() => setCallState('ready'))
-        }
-      }
-
-      const offer = await peerConnection.createOffer()
-      await peerConnection.setLocalDescription(offer)
-
-      const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${session.client_secret.value}`,
-          'Content-Type': 'application/sdp',
+      client.setListeners({
+        onReady: () => undefined,
+        onPartialTranscript: (text) => {
+          const trimmed = text.trim()
+          const interruptedResponseId = activeResponseIdRef.current
+          if (!trimmed || !interruptedResponseId) return
+          if (isLikelySttHallucination(trimmed)) return
+          pendingBargeInRef.current = { responseId: interruptedResponseId, at: Date.now() }
+          client.cancelSpeech('barge_in')
+          void handleRealtimeEvent({
+            type: 'response.cancelled',
+            response: { id: interruptedResponseId },
+          })
         },
-        body: offer.sdp ?? '',
+        onPlaybackStart: (utteranceId) => {
+          lastAgentSpeakStartRef.current = Date.now()
+          void utteranceId
+        },
+        onPlaybackEnd: (utteranceId, chars) => dispatchSpoken(utteranceId, chars),
+        onPlaybackInterrupted: (utteranceId) => {
+          void handleRealtimeEvent({
+            type: 'response.cancelled',
+            response: { id: utteranceId },
+          })
+        },
+        onFinalTranscript: (text, languageCode) => {
+          const trimmed = text.trim()
+          if (!trimmed) return
+          const pendingBargeIn = pendingBargeInRef.current
+          const recentBargeIn = !!pendingBargeIn && Date.now() - pendingBargeIn.at < 2000
+          // Drop short interjections that arrive while the agent's TTS audio
+          // was still playing (within ~0.9s of last audio_start). Almost always
+          // a Saarika hallucination from self-echo, not a real barge-in.
+          const lastSpeakAt = lastAgentSpeakStartRef.current
+          if (
+            !recentBargeIn &&
+            lastSpeakAt !== null &&
+            activeResponseIdRef.current &&
+            Date.now() - lastSpeakAt < 900 &&
+            trimmed.split(/\s+/).length <= 2
+          ) {
+            return
+          }
+          pendingBargeInRef.current = null
+
+          // Language switch detection still runs per-fragment so the next
+          // agent turn uses the right TTS voice.
+          const mapped = languageCode === 'bn-IN' ? 'bengali' : null
+          if (mapped && mapped !== activeLanguageRef.current) {
+            activeLanguageRef.current = mapped
+            const nextAdvice = defaultLanguageAdvice(mapped)
+            nextAdvice.detected_language_id = mapped
+            nextAdvice.suggested_language_id = mapped
+            nextAdvice.should_switch = true
+            nextAdvice.confidence = 'high'
+            nextAdvice.nudge = `Customer switched to ${mapped}. Reply in ${mapped}.`
+            languageAdviceRef.current = nextAdvice
+            startTransition(() => {
+              setActiveLanguageId(mapped)
+              setLanguageAdvice(nextAdvice)
+            })
+          }
+
+          // Show the fragment in the transcript right away so the user sees
+          // their words land. But do NOT call the LLM yet — buffer fragments
+          // into one logical turn.
+          appendCustomerTranscript(
+            trimmed,
+            `customer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          )
+          turnCommitBufferRef.current.push(trimmed)
+
+          if (turnCommitTimerRef.current !== null) {
+            window.clearTimeout(turnCommitTimerRef.current)
+          }
+          turnCommitTimerRef.current = window.setTimeout(() => {
+            turnCommitTimerRef.current = null
+            const merged = turnCommitBufferRef.current.join(' ').trim()
+            turnCommitBufferRef.current = []
+            if (!merged) return
+            // Drop suspected STT hallucinations BEFORE dispatching to the LLM.
+            if (isLikelySttHallucination(merged)) {
+              appendSystemTranscript('Dropped transcript hallucination (STT echoed prompt on silence).')
+              setThinking(false)
+              return
+            }
+            // Hand the merged turn to the existing pipeline. We synthesize
+            // the realtime-style event with the merged text but skip the
+            // appendCustomerTranscript inside handleRealtimeEvent's branch
+            // (it would duplicate what we already showed). The handler
+            // pattern is: kick supervisor + chat agent. We reproduce just
+            // that here, without the duplicate UI append.
+            void runUnifiedCustomerTurn(merged)
+          }, turnCommitDelayMs)
+        },
+        onError: (message) => {
+          appendSystemTranscript(`Sarvam error: ${message}`)
+        },
+        onDisconnect: () => {
+          if (callStateRef.current !== 'ending') {
+            startTransition(() => setCallState('ready'))
+          }
+        },
       })
 
-      if (!sdpResponse.ok) {
-        throw new Error(`SDP exchange failed with ${sdpResponse.status}.`)
+      // Wrap speak so dispatchSpoken knows the text to feed downstream.
+      const originalSpeak = client.speak.bind(client)
+      client.speak = (text: string, langCode?: string, utteranceId?: string) => {
+        const id = originalSpeak(text, langCode, utteranceId)
+        if (id) utteranceTextById.set(id, text)
+        return id
       }
 
-      const answerSdp = await sdpResponse.text()
-      await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+      await client.connect(session)
+      await client.startMic(stream)
+
+      startTransition(() => setCallState('connected'))
+      activeResponseIdRef.current = null
+      pendingResponseQueueRef.current = []
+      pendingSessionUpdateRef.current = null
+
+      const openingLang =
+        snapshot.config.supported_languages.find(
+          (l) => l.id === selectedLanguageRef.current,
+        )?.agent_label ?? 'Hinglish'
+      const openingText = buildOpeningText(snapshot.customer, snapshot.agent_persona, openingLang)
+      lastApprovedScriptRef.current = openingText
+      sendRealtimeEvent(buildScriptedResponse(openingText))
     } catch (error) {
       closeMediaResources()
       const message = error instanceof Error ? error.message : 'Failed to start the browser call.'
@@ -1954,8 +2157,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const isLive = callState === 'connected'
   const supportedRealtimeModels =
     bootstrap?.config.supported_realtime_models ?? [
-      { id: 'gpt-realtime-mini', label: 'GPT Realtime Mini' },
-      { id: 'gpt-realtime', label: 'GPT Realtime' },
+      { id: 'bulbul:v3', label: 'Sarvam Bulbul v3' },
     ]
   const selectedRealtimeModelLabel = realtimeModelLabel(
     supportedRealtimeModels,
@@ -1967,22 +2169,88 @@ export default function App({ username, onLogout }: AppProps = {}) {
     supportedLanguages,
     languageAdvice.detected_language_id || activeLanguageId,
   )
-  const realtimeRateCards = supportedRealtimeModels.map((model) => {
-    const pricing = costs.price_table[model.id] ?? {}
-    return {
-      ...model,
-      textInput: pricing.text_input_per_million ?? 0,
-      textCachedInput: pricing.text_cached_input_per_million ?? 0,
-      textOutput: pricing.text_output_per_million ?? 0,
-      audioInput: pricing.audio_input_per_million ?? 0,
-      audioCachedInput: pricing.audio_cached_input_per_million ?? 0,
-      audioOutput: pricing.audio_output_per_million ?? 0,
+  const sarvamPricingReference = bootstrap?.config.pricing_reference?.sarvam
+  const sarvamPricingCards: PricingCard[] = []
+  const ttsModelId = bootstrap?.config.tts_model ?? selectedRealtimeModel
+  if (sarvamPricingReference) {
+    const ttsInr = sarvamPricingReference.tts_inr_per_10k_chars[ttsModelId]
+    if (typeof ttsInr === 'number') {
+      sarvamPricingCards.push({
+        id: 'sarvam-tts',
+        title: 'Voice synthesis',
+        model: ttsModelId,
+        active: ttsModelId === selectedRealtimeModel,
+        lines: [`Text out ${formatInrRate(ttsInr)}/10k chars`],
+      })
     }
-  })
-  const transcriptionPricing =
-    costs.price_table[
-      bootstrap?.config.transcription_model ?? costs.agent.transcription_usage.model ?? 'gpt-4o-mini-transcribe'
-    ] ?? {}
+
+    const sttModelId =
+      bootstrap?.config.stt_model ??
+      bootstrap?.config.transcription_model ??
+      costs.agent.transcription_usage.model ??
+      'saaras:v3'
+    const sttInr = sarvamPricingReference.stt_inr_per_hour[sttModelId]
+    if (typeof sttInr === 'number') {
+      sarvamPricingCards.push({
+        id: 'sarvam-stt',
+        title: 'Transcription',
+        model: sttModelId,
+        lines: [`Audio in ${formatInrRate(sttInr)}/hour`],
+      })
+    }
+  }
+
+  const buildUsdModelCard = (id: string, title: string, modelId: string): PricingCard | null => {
+    const pricing = costs.price_table[modelId] ?? {}
+    const lines: string[] = []
+    if ((pricing.audio_input_per_million ?? 0) > 0) {
+      lines.push(`Audio in ${formatUsdRate(pricing.audio_input_per_million ?? 0)}/1M`)
+    }
+    if ((pricing.audio_cached_input_per_million ?? 0) > 0) {
+      lines.push(`Cached audio in ${formatUsdRate(pricing.audio_cached_input_per_million ?? 0)}/1M`)
+    }
+    if ((pricing.audio_output_per_million ?? 0) > 0) {
+      lines.push(`Audio out ${formatUsdRate(pricing.audio_output_per_million ?? 0)}/1M`)
+    }
+    if ((pricing.text_input_per_million ?? 0) > 0) {
+      lines.push(`Text in ${formatUsdRate(pricing.text_input_per_million ?? 0)}/1M`)
+    }
+    if ((pricing.text_cached_input_per_million ?? 0) > 0) {
+      lines.push(`Cached text in ${formatUsdRate(pricing.text_cached_input_per_million ?? 0)}/1M`)
+    }
+    if ((pricing.text_output_per_million ?? 0) > 0) {
+      lines.push(`Text out ${formatUsdRate(pricing.text_output_per_million ?? 0)}/1M`)
+    }
+    if (lines.length === 0) return null
+    return {
+      id,
+      title,
+      model: modelId,
+      lines,
+    }
+  }
+
+  const usdPricingCards = [
+    buildUsdModelCard('chat-agent-pricing', 'Chat agent', bootstrap?.config.chat_model ?? costs.chat_agent?.model ?? 'gpt-4.1'),
+    buildUsdModelCard('supervisor-pricing', 'Supervisor', bootstrap?.config.supervisor_model ?? costs.supervisor.model),
+    buildUsdModelCard('language-coach-pricing', 'Language coach', bootstrap?.config.language_coach_model ?? costs.language_coach.model),
+  ].filter((card): card is PricingCard => Boolean(card))
+  const sarvamPricingNote = sarvamPricingReference
+    ? `Sarvam speech pricing is shown in INR. Ledger totals are still normalized to USD using ₹${sarvamPricingReference.inr_per_usd.toFixed(2)} per USD.`
+    : null
+  const policyStackCostUsd =
+    (costs.chat_agent?.estimated_cost_usd ?? 0) +
+    costs.supervisor.estimated_cost_usd +
+    costs.language_coach.estimated_cost_usd
+  const policyStackTokens =
+    (costs.chat_agent?.total_tokens ?? 0) +
+    costs.supervisor.total_tokens +
+    costs.language_coach.total_tokens
+  const voiceTtsChars = costs.agent.response_usage.text_output_tokens
+  const voiceSttSeconds = costs.agent.transcription_usage.audio_input_tokens
+  const chatModelLabel = bootstrap?.config.chat_model ?? costs.chat_agent?.model ?? 'gpt-4.1'
+  const supervisorModelLabel = bootstrap?.config.supervisor_model ?? costs.supervisor.model
+  const languageCoachModelLabel = bootstrap?.config.language_coach_model ?? costs.language_coach.model
 
   const stageTone =
     callState === 'error'
@@ -2411,27 +2679,52 @@ export default function App({ username, onLogout }: AppProps = {}) {
           <aside className="side">
             <div className="cost-strip cost-strip--side">
               {mode === 'voice' ? (
+                <>
                 <div className="cost-block">
                   <div className="cost-block__head">
-                    <span>Live Caller (voice)</span>
-                    <small>{costs.agent.events > 0 ? costs.agent.model : selectedRealtimeModel}</small>
+                    <span>Sarvam Speech</span>
+                    <small>{`${costs.agent.model} + ${bootstrap?.config.transcription_model ?? costs.agent.transcription_usage.model}`}</small>
                   </div>
                   <div className="cost-block__value">{formatUsd(costs.agent.estimated_cost_usd)}</div>
                   <div className="cost-block__meta">
-                    <span>{formatNumber(costs.agent.total_tokens)} tok</span>
-                    <span>voice {formatUsd(costs.agent.response_usage.estimated_cost_usd)}</span>
+                    <span>tts {formatUsd(costs.agent.response_usage.estimated_cost_usd)}</span>
                     <span>stt {formatUsd(costs.agent.transcription_usage.estimated_cost_usd)}</span>
-                    <span>cached audio {formatNumber(costs.agent.response_usage.audio_cached_input_tokens)}</span>
-                    <span>transcript out {formatNumber(costs.agent.transcription_usage.text_output_tokens)}</span>
-                    <span>· audio in {formatNumber(costs.agent.response_usage.audio_input_tokens)}</span>
-                    <span>· audio out {formatNumber(costs.agent.response_usage.audio_output_tokens)}</span>
+                    <span>chars {formatNumber(voiceTtsChars)}</span>
+                    <span>secs {formatNumber(voiceSttSeconds)}</span>
                   </div>
                 </div>
+                <div className="cost-block">
+                  <div className="cost-block__head">
+                    <span>GPT Policy</span>
+                    <small>{chatModelLabel}</small>
+                  </div>
+                  <div className="cost-block__value">{formatUsd(policyStackCostUsd)}</div>
+                  <div className="cost-block__meta">
+                    <span>{formatNumber(policyStackTokens)} tok</span>
+                    <span>chat {formatUsd(costs.chat_agent?.estimated_cost_usd ?? 0)}</span>
+                    <span>coach {formatUsd(costs.language_coach.estimated_cost_usd)}</span>
+                    <span>supervisor {formatUsd(costs.supervisor.estimated_cost_usd)}</span>
+                  </div>
+                </div>
+                <div className="cost-block cost-block--combined">
+                  <div className="cost-block__head">
+                    <span>Total Call</span>
+                    <small>{`${chatModelLabel} + speech`}</small>
+                  </div>
+                  <div className="cost-block__value">{formatUsd(costs.combined.estimated_cost_usd)}</div>
+                  <div className="cost-block__meta">
+                    <span>{formatNumber(costs.combined.total_tokens)} units</span>
+                    <span>{costs.agent.model}</span>
+                    <span>{supervisorModelLabel}</span>
+                    <span>{languageCoachModelLabel}</span>
+                  </div>
+                </div>
+                </>
               ) : (
                 <div className="cost-block">
                   <div className="cost-block__head">
                     <span>Chat Agent (text)</span>
-                    <small>{costs.chat_agent?.model ?? bootstrap?.config.chat_model ?? 'gpt-4.1-mini'}</small>
+                    <small>{costs.chat_agent?.model ?? bootstrap?.config.chat_model ?? 'gpt-4.1'}</small>
                   </div>
                   <div className="cost-block__value">
                     {formatUsd(costs.chat_agent?.estimated_cost_usd ?? 0)}
@@ -2596,39 +2889,57 @@ export default function App({ username, onLogout }: AppProps = {}) {
                       <strong>{languageAdvice.confidence}</strong>
                     </div>
                   </div>
-                  <div className="realtime-rate-grid">
-                    {realtimeRateCards.map((model) => (
-                      <div
-                        className={`realtime-rate-card${
-                          model.id === selectedRealtimeModel ? ' realtime-rate-card--active' : ''
-                        }`}
-                        key={model.id}
-                      >
-                        <div className="realtime-rate-card__head">
-                          <strong>{model.label}</strong>
-                          <span>{model.id}</span>
+                  <div className="pricing-stack">
+                    {sarvamPricingCards.length > 0 ? (
+                      <div className="pricing-section">
+                        <div className="pricing-section__head">
+                          <span className="card__eyebrow">Sarvam Speech Pricing</span>
+                          <span>INR reference</span>
                         </div>
-                        <div className="realtime-rate-card__meta">
-                          <span>Audio in ${model.audioInput.toFixed(2)}/1M</span>
-                          <span>Cached audio in ${model.audioCachedInput.toFixed(2)}/1M</span>
-                          <span>Audio out ${model.audioOutput.toFixed(2)}/1M</span>
-                          <span>Text in ${model.textInput.toFixed(2)}/1M</span>
-                          <span>Cached text in ${model.textCachedInput.toFixed(2)}/1M</span>
-                          <span>Text out ${model.textOutput.toFixed(2)}/1M</span>
+                        <div className="realtime-rate-grid">
+                          {sarvamPricingCards.map((card) => (
+                            <div
+                              className={`realtime-rate-card${card.active ? ' realtime-rate-card--active' : ''}`}
+                              key={card.id}
+                            >
+                              <div className="realtime-rate-card__head">
+                                <strong>{card.title}</strong>
+                                <span>{card.model}</span>
+                              </div>
+                              <div className="realtime-rate-card__meta">
+                                {card.lines.map((line) => (
+                                  <span key={line}>{line}</span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {sarvamPricingNote ? <div className="pricing-note">{sarvamPricingNote}</div> : null}
+                      </div>
+                    ) : null}
+                    {usdPricingCards.length > 0 ? (
+                      <div className="pricing-section">
+                        <div className="pricing-section__head">
+                          <span className="card__eyebrow">Policy Stack Pricing</span>
+                          <span>USD per 1M tokens</span>
+                        </div>
+                        <div className="realtime-rate-grid">
+                          {usdPricingCards.map((card) => (
+                            <div className="realtime-rate-card" key={card.id}>
+                              <div className="realtime-rate-card__head">
+                                <strong>{card.title}</strong>
+                                <span>{card.model}</span>
+                              </div>
+                              <div className="realtime-rate-card__meta">
+                                {card.lines.map((line) => (
+                                  <span key={line}>{line}</span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
-                    ))}
-                    <div className="realtime-rate-card" key="transcription-model">
-                      <div className="realtime-rate-card__head">
-                        <strong>Transcription</strong>
-                        <span>{bootstrap?.config.transcription_model ?? costs.agent.transcription_usage.model}</span>
-                      </div>
-                      <div className="realtime-rate-card__meta">
-                        <span>Audio in ${(transcriptionPricing.audio_input_per_million ?? 0).toFixed(2)}/1M</span>
-                        <span>Prompt text in ${(transcriptionPricing.text_input_per_million ?? 0).toFixed(2)}/1M</span>
-                        <span>Text out ${(transcriptionPricing.text_output_per_million ?? 0).toFixed(2)}/1M</span>
-                      </div>
-                    </div>
+                    ) : null}
                   </div>
                   <div className="coach-note">{languageAdvice.nudge}</div>
                 </div>

@@ -33,10 +33,8 @@ export function fetchBootstrap() {
 }
 
 export function createRealtimeSession(body: {
-  instructions: string
-  model: string
-  voice: string
-  language_id: string
+  voice?: string
+  language_id?: string
 }) {
   return requestJson<SessionResponse>('/api/session', {
     method: 'POST',
@@ -102,10 +100,12 @@ export function resetCostLedger(body?: { model?: string; transcription_model?: s
 export function recordCostEvent(body: {
   event_id: string
   session_id: string
-  source: 'agent' | 'supervisor' | 'language_coach'
-  usage_type: 'response' | 'transcription'
+  source: 'agent' | 'supervisor' | 'language_coach' | 'sarvam'
+  usage_type: 'response' | 'transcription' | 'tts' | 'stt'
   model: string
   usage: Record<string, unknown>
+  chars?: number
+  seconds?: number
 }) {
   return requestJson<CostState>('/api/metrics/costs/event', {
     method: 'POST',

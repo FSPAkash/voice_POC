@@ -11,20 +11,58 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
+      - key: SARVAM_API_KEY
+        sync: false
       - key: OPENAI_BASE_URL
         value: https://api.openai.com/v1
-      - key: OPENAI_REALTIME_MODEL
-        value: gpt-realtime-mini
       - key: OPENAI_SUPERVISOR_MODEL
         value: gpt-4.1-mini
       - key: OPENAI_LANGUAGE_COACH_MODEL
         value: gpt-4.1-mini
       - key: OPENAI_CHAT_MODEL
         value: gpt-4.1
-      - key: OPENAI_REALTIME_TRANSCRIPTION_MODEL
-        value: gpt-4o-mini-transcribe
-      - key: OPENAI_REALTIME_VOICE
-        value: cedar
+      - key: POLICY_ENGINE_MODE
+        value: llm
+      - key: SARVAM_BASE_URL
+        value: https://api.sarvam.ai
+      - key: SARVAM_TTS_MODEL
+        value: bulbul:v3
+      - key: SARVAM_STT_MODEL
+        value: saaras:v3
+      - key: SARVAM_DEFAULT_FEMALE
+        value: priya
+      - key: SARVAM_DEFAULT_MALE
+        value: ratan
+      - key: SARVAM_TTS_SAMPLE_RATE
+        value: "24000"
+      - key: SARVAM_STT_SAMPLE_RATE
+        value: "16000"
+      - key: SARVAM_TTS_PACE
+        value: "1.1"
+      - key: SARVAM_TTS_TEMPERATURE
+        value: "0.45"
+      - key: SARVAM_TTS_MIN_BUFFER_SIZE
+        value: "30"
+      - key: SARVAM_TTS_MAX_CHUNK_LENGTH
+        value: "200"
+      - key: SARVAM_TTS_OUTPUT_CODEC
+        value: linear16
+      - key: SARVAM_TTS_OUTPUT_BITRATE
+        value: 128k
+      - key: SARVAM_TTS_SEND_COMPLETION_EVENT
+        value: "true"
+      - key: SARVAM_TTS_DICT_ID
+        sync: false
+      - key: SARVAM_STT_MODE
+        value: codemix
+      - key: SARVAM_INR_PER_USD
+        value: "96.13"
+      - key: SARVAM_BULBUL_V3_INR_PER_10K_CHARS
+        value: "30"
+      - key: SARVAM_BULBUL_V2_INR_PER_10K_CHARS
+        value: "15"
+      - key: SARVAM_STT_INR_PER_HOUR
+        value: "30"
       - key: DEMO_ACCOUNT_ID
         value: DHL001
       - key: FLASK_DEBUG

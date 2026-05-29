@@ -163,6 +163,22 @@ export type RealtimeModelOption = {
   label: string
 }
 
+export type SarvamVoiceOption = {
+  id: string
+  label: string
+  gender: 'female' | 'male' | 'neutral'
+}
+
+export type PricingReference = {
+  openai_currency?: 'USD'
+  sarvam?: {
+    currency?: 'INR'
+    inr_per_usd: number
+    tts_inr_per_10k_chars: Record<string, number>
+    stt_inr_per_hour: Record<string, number>
+  }
+}
+
 export type BootstrapResponse = {
   account_number: string
   customer: Customer
@@ -192,19 +208,32 @@ export type BootstrapResponse = {
     default_language_id: string
     supported_languages: LanguageOption[]
     chat_model?: string
+    tts_provider?: 'sarvam' | 'openai'
+    stt_provider?: 'sarvam' | 'openai'
+    tts_model?: string
+    stt_model?: string
+    sarvam_voices?: SarvamVoiceOption[]
+    sarvam_language_codes?: Record<string, string>
+    pricing_reference?: PricingReference
+    tts_sample_rate?: number
+    stt_sample_rate?: number
   }
 }
 
 export type SessionResponse = {
-  client_secret: {
-    value: string
-    expires_at?: number | string
-  }
-  session: Record<string, unknown>
-  model: string
+  session_id: string
   voice: string
-  transcription_model: string
   language_id: string
+  language_code: string
+  tts_language_code?: string
+  stt_language_code?: string
+  tts_ws_path: string
+  stt_ws_path: string
+  tts_sample_rate: number
+  stt_sample_rate: number
+  tts_model: string
+  stt_model: string
+  stt_mode?: string
 }
 
 export type SupervisorEvaluationResponse = {

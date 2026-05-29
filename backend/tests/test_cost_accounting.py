@@ -109,6 +109,45 @@ class CostAccountingTests(unittest.TestCase):
         )
         self.assertTrue(math.isclose(cost, expected, rel_tol=0, abs_tol=1e-12))
 
+    def test_text_cost_from_chat_completions_usage_shape(self) -> None:
+        usage = {
+            "prompt_tokens": 4068,
+            "completion_tokens": 72,
+            "prompt_tokens_details": {
+                "cached_tokens": 0,
+            },
+        }
+
+        cost, token_map = pricing_app.text_cost_from_usage("gpt-4.1", usage)
+
+        self.assertEqual(
+            token_map,
+            {
+                "text_input_tokens": 4068,
+                "text_cached_input_tokens": 0,
+                "text_output_tokens": 72,
+            },
+        )
+        expected = (
+            4068 * 2.0 / 1_000_000
+            + 72 * 8.0 / 1_000_000
+        )
+        self.assertTrue(math.isclose(cost, expected, rel_tol=0, abs_tol=1e-12))
+
+    def test_sarvam_tts_cost_matches_bulbul_v3_rate(self) -> None:
+        cost, token_map = pricing_app.sarvam_tts_cost_from_chars("bulbul:v3", 10_000)
+
+        self.assertEqual(token_map, {"text_output_tokens": 10_000})
+        expected = 10_000 * pricing_app.PRICE_TABLE["bulbul:v3"]["text_output_per_million"] / 1_000_000
+        self.assertTrue(math.isclose(cost, expected, rel_tol=0, abs_tol=1e-12))
+
+    def test_sarvam_stt_cost_rounds_up_to_nearest_second(self) -> None:
+        cost, token_map = pricing_app.sarvam_stt_cost_from_seconds("saaras:v3", 0.2)
+
+        self.assertEqual(token_map, {"audio_input_tokens": 1})
+        expected = pricing_app.PRICE_TABLE["saaras:v3"]["audio_input_per_million"] / 1_000_000
+        self.assertTrue(math.isclose(cost, expected, rel_tol=0, abs_tol=1e-12))
+
     def test_load_ledger_backfills_missing_nested_fields(self) -> None:
         pricing_app.write_json(
             pricing_app.LEDGER_FILE,
@@ -146,6 +185,7 @@ class CostAccountingTests(unittest.TestCase):
         self.assertIn("processed_usage_event_ids", ledger)
         self.assertIn("session_id", ledger)
         self.assertEqual(ledger["agent"]["transcription_usage"]["text_input_tokens"], 0)
+        self.assertEqual(pricing_app.ledger_with_combined(ledger)["price_table_version"], pricing_app.PRICE_TABLE_VERSION)
 
     def test_agent_response_events_are_idempotent_and_session_scoped(self) -> None:
         ledger = pricing_app.default_ledger(

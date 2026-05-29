@@ -1,25 +1,25 @@
 {
   "agent": {
-    "model": "gpt-realtime-mini",
-    "events": 3,
+    "model": "bulbul:v3",
+    "events": 6,
     "response_usage": {
-      "text_input_tokens": 635,
-      "text_cached_input_tokens": 128,
-      "text_output_tokens": 269,
-      "audio_input_tokens": 442,
+      "text_input_tokens": 0,
+      "text_cached_input_tokens": 0,
+      "text_output_tokens": 1090,
+      "audio_input_tokens": 0,
       "audio_cached_input_tokens": 0,
-      "audio_output_tokens": 998,
-      "estimated_cost_usd": 0.025415
+      "audio_output_tokens": 0,
+      "estimated_cost_usd": 0.034016
     },
     "transcription_usage": {
-      "model": "gpt-4o-mini-transcribe",
-      "audio_input_tokens": 40,
-      "text_input_tokens": 68,
-      "text_output_tokens": 14,
-      "estimated_cost_usd": 0.000276
+      "model": "saaras:v3",
+      "audio_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "estimated_cost_usd": 0.0
     },
-    "total_tokens": 2594,
-    "estimated_cost_usd": 0.025691
+    "total_tokens": 1090,
+    "estimated_cost_usd": 0.034016
   },
   "supervisor": {
     "model": "deterministic-supervisor",
@@ -41,21 +41,22 @@
   },
   "chat_agent": {
     "model": "gpt-4.1",
-    "events": 3,
-    "text_input_tokens": 0,
-    "text_cached_input_tokens": 0,
-    "text_output_tokens": 0,
-    "total_tokens": 0,
-    "estimated_cost_usd": 0.0
+    "events": 5,
+    "text_input_tokens": 7815,
+    "text_cached_input_tokens": 13312,
+    "text_output_tokens": 458,
+    "total_tokens": 21585,
+    "estimated_cost_usd": 0.02595
   },
   "processed_usage_event_ids": [
-    "agent-response:resp_DiGgERWJD0xx0TXIKYOD4",
-    "agent-transcription:item_DiGgLjpgMluwcpZGJ10pw",
-    "agent-response:resp_DiGgQh5uLUXEaWplzXGWE",
-    "agent-transcription:item_DiGgeVAypHb94eTnhF3XG",
-    "agent-response:resp_DiGglQis3VEGclKlLKWYB"
+    "tts_utt_317ghxv7",
+    "tts_utt_wc0n0gtn",
+    "tts_utt_4842fnwp",
+    "tts_utt_bzu8g0k5",
+    "tts_utt_c4ooudm6",
+    "tts_utt_b4sl8odt"
   ],
-  "session_id": "cost_session_dfead6b578e5",
-  "updated_at": "2026-05-22T09:42:40.524612+00:00",
-  "price_table_version": "openai-pricing-2026-05-22"
+  "session_id": "cost_session_386c50a2c204",
+  "updated_at": "2026-05-29T05:10:20.952207+00:00",
+  "price_table_version": "openai+sarvam-pricing-2026-05-29"
 }
