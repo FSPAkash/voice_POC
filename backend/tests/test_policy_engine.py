@@ -40,6 +40,32 @@ class PolicyEngineTests(unittest.TestCase):
             "english",
         )
 
+    def test_explicit_language_request_detects_marathi(self) -> None:
+        self.assertEqual(
+            policy_app.explicit_language_request_language_id("\u092e\u0930\u093e\u0920\u0940\u0924 \u092c\u094b\u0932\u093e."),
+            "marathi",
+        )
+
+    def test_explicit_language_request_detects_tamil(self) -> None:
+        self.assertEqual(
+            policy_app.explicit_language_request_language_id("\u0ba4\u0bae\u0bbf\u0bb4\u0bbf\u0bb2\u0bcd \u0baa\u0bc7\u0b9a\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd."),
+            "tamil",
+        )
+
+    def test_supported_render_language_id_keeps_marathi_and_tamil(self) -> None:
+        self.assertEqual(policy_app.supported_render_language_id("marathi"), "marathi")
+        self.assertEqual(policy_app.supported_render_language_id("tamil"), "tamil")
+
+    def test_language_id_for_script_detects_marathi_markers(self) -> None:
+        self.assertEqual(
+            policy_app.language_id_for_script(
+                "\u092e\u0932\u093e line by line invoice \u0938\u093e\u0902\u0917\u093e.",
+                "hinglish",
+                "hinglish",
+            ),
+            "marathi",
+        )
+
     def test_bootstrap_reports_live_voice_and_model_config(self) -> None:
         client = policy_app.app.test_client()
 

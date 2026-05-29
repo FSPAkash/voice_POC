@@ -379,6 +379,8 @@ LANGUAGE_REQUEST_ALIASES: dict[str, tuple[str, ...]] = {
     "hinglish": ("hinglish",),
     "hindi": ("hindi", "hindee", "hindhi"),
     "bengali": ("bengali", "bangla", "bangali"),
+    "marathi": ("marathi", "marati", "\u092e\u0930\u093e\u0920\u0940"),
+    "tamil": ("tamil", "thamizh", "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", "\u0ba4\u0bae\u0bbf\u0bb4"),
 }
 
 # Supported scripts include Latin plus scripts used by Indian languages in the selector.
@@ -601,6 +603,18 @@ def explicit_language_request_language_id(transcript: str) -> str | None:
             if text_contains_language_alias(text, language_aliases(language_id)):
                 return "english"
 
+    local_switch_verbs = (
+        "\u092c\u094b\u0932",
+        "\u092c\u094b\u0932\u093f",
+        "\u092c\u094b\u0932\u093e",
+        "\u0baa\u0bc7\u0b9a",
+        "\u0baa\u0bc7\u0b9a\u0bc1",
+    )
+    for language_id in SUPPORTED_LANGUAGE_MAP:
+        aliases = language_aliases(language_id)
+        if text_contains_language_alias(text, aliases) and any(verb in text for verb in local_switch_verbs):
+            return language_id
+
     command_patterns = (
         r"(?:speak|reply|respond|continue|talk|communicate|answer)\s+(?:to me\s+)?(?:in\s+)?{alias}",
         r"(?:switch(?:\s+back)?\s+to|back\s+to|use)\s+{alias}",
@@ -818,6 +832,22 @@ ROMANIZED_INDIC_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+MARATHI_SCRIPT_MARKERS = (
+    "\u0906\u0939\u0947",
+    "\u0906\u0939\u0947\u0924",
+    "\u0924\u0941\u092e\u094d\u0939\u0940",
+    "\u092e\u0932\u093e",
+    "\u0938\u093e\u0902\u0917\u093e",
+    "\u092d\u0930\u0923\u093e",
+)
+
+
+def looks_like_marathi(text: str) -> bool:
+    lowered = normalize_whitespace(text).casefold()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in MARATHI_SCRIPT_MARKERS)
+
 def has_indic_script(text: str) -> bool:
     for ch in text:
         cp = ord(ch)
@@ -864,6 +894,8 @@ def language_id_for_script(text: str, current_language_id: str | None, preferred
     for char in text:
         codepoint = ord(char)
         if 0x0900 <= codepoint <= 0x097F:
+            if looks_like_marathi(text):
+                return "marathi"
             if current in {"hindi", "marathi", "nepali", "konkani", "maithili", "sanskrit", "dogri", "bodo"}:
                 return current
             if preferred in {"hindi", "marathi", "nepali", "konkani", "maithili", "sanskrit", "dogri", "bodo"}:
@@ -980,7 +1012,7 @@ def normalize_language_advice(
     }
 
 
-RENDERABLE_LANGUAGE_IDS = {"english", "hinglish", "hindi", "bengali"}
+RENDERABLE_LANGUAGE_IDS = {"english", "hinglish", "hindi", "bengali", "marathi", "tamil"}
 DETERMINISTIC_CHAT_MODEL = "deterministic-call-engine"
 DETERMINISTIC_SUPERVISOR_MODEL = "deterministic-supervisor"
 DETERMINISTIC_LANGUAGE_COACH_MODEL = "deterministic-language-coach"
@@ -1136,6 +1168,10 @@ def agent_intro_text(language_id: str, voice: str | None) -> str:
     if language_id in {"hinglish", "hindi"}:
         verb = "bol rahi hoon" if persona["gender"] == "female" else "bol raha hoon"
         return f"Mera naam {name} hai, main DHL Express India se {verb}."
+    if language_id == "marathi":
+        return f"\u092e\u093e\u091d\u0902 \u0928\u093e\u0935 {name} \u0906\u0939\u0947, \u092e\u0940 DHL Express India \u092e\u0927\u0942\u0928 \u092c\u094b\u0932\u0924 \u0906\u0939\u0947."
+    if language_id == "tamil":
+        return f"\u0ba8\u0bbe\u0ba9\u0bcd {name}, DHL Express India-\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0baa\u0bc7\u0b9a\u0bc1\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd."
     if language_id == "bengali":
         return f"Amar naam {name}, ami DHL Express India theke bolchi."
     return f"My name is {name} and I am calling from DHL Express India."
@@ -1148,6 +1184,10 @@ def agent_calling_phrase(voice: str | None) -> str:
 def reason_probe_text(language_id: str) -> str:
     if language_id in {"hinglish", "hindi"}:
         return "Kya main delay ka reason jaan sakta hoon, taaki main usko sahi tarah note kar sakoon?"
+    if language_id == "marathi":
+        return "\u0915\u0943\u092a\u092f\u093e \u0935\u093f\u0932\u0902\u092c\u093e\u091a\u0902 \u0915\u093e\u0930\u0923 \u0938\u093e\u0902\u0917\u093e\u0932 \u0915\u093e, \u092e\u094d\u0939\u0923\u091c\u0947 \u092e\u0940 \u0924\u0947 \u0928\u0940\u091f \u0928\u094b\u0902\u0926\u0935\u0942 \u0936\u0915\u0947\u0928?"
+    if language_id == "tamil":
+        return "\u0baa\u0ba3\u0bae\u0bcd \u0ba4\u0bbe\u0bae\u0ba4\u0bae\u0bbe\u0ba9\u0ba4\u0bb1\u0bcd\u0b95\u0bbe\u0ba9 \u0b95\u0bbe\u0bb0\u0ba3\u0ba4\u0bcd\u0ba4\u0bc8\u0b9a\u0bcd \u0b9a\u0bca\u0bb2\u0bcd\u0bb2 \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bbe, \u0ba8\u0bbe\u0ba9\u0bcd \u0b9a\u0bb0\u0bbf\u0baf\u0bbe\u0b95 \u0baa\u0ba4\u0bbf\u0bb5\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0baf \u0bb5\u0bc7\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd."
     if language_id == "bengali":
         return "Payment deri hocche keno, seta ki ektu bolben jate ami thik bhabe note korte pari?"
     return "May I know the reason for the delay so that I can note it correctly?"
@@ -1156,6 +1196,10 @@ def reason_probe_text(language_id: str) -> str:
 def payment_date_request_text(language_id: str) -> str:
     if language_id in {"hinglish", "hindi"}:
         return "Kya aap next 2 business days ke andar ek exact payment date confirm kar sakte hain?"
+    if language_id == "marathi":
+        return "\u092a\u0941\u0922\u0940\u0932 2 business days \u092e\u0927\u094d\u092f\u0947 \u0928\u0947\u092e\u0915\u0940 payment date confirm \u0915\u0930\u0942 \u0936\u0915\u093e\u0932 \u0915\u093e?"
+    if language_id == "tamil":
+        return "\u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 2 business days-\u0b95\u0bcd\u0b95\u0bc1\u0bb3\u0bcd \u0b92\u0bb0\u0bc1 exact payment date confirm \u0b9a\u0bc6\u0baf\u0bcd\u0baf \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bbe?"
     if language_id == "bengali":
         return "Apni ki agami 2 business days er moddhe ekta exact payment date confirm korte parben?"
     return "Could you confirm an exact payment date within the next 2 business days?"
@@ -1166,6 +1210,10 @@ def resolved_status_summary_text(invoices: list[dict[str, Any]], language_id: st
         return ""
     if language_id in {"hinglish", "hindi"}:
         return "Jin invoices par pehle issues the, woh resolve ho chuke hain, isliye ab sirf payment pending hai."
+    if language_id == "marathi":
+        return "\u091c\u094d\u092f\u093e invoices \u0935\u0930 \u0906\u0927\u0940 issues \u0939\u094b\u0924\u0947 \u0924\u0947 resolve \u091d\u093e\u0932\u0947 \u0906\u0939\u0947\u0924, \u092e\u094d\u0939\u0923\u0942\u0928 \u0906\u0924\u093e \u092b\u0915\u094d\u0924 payment pending \u0906\u0939\u0947."
+    if language_id == "tamil":
+        return "\u0bae\u0bc1\u0ba9\u0bcd\u0ba9\u0bb0\u0bcd \u0b87\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4 issues resolve \u0b86\u0b95\u0bbf\u0bb5\u0bbf\u0b9f\u0bcd\u0b9f\u0ba9, \u0b85\u0ba4\u0ba9\u0bbe\u0bb2\u0bcd \u0b87\u0baa\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 payment \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd pending \u0b86\u0b95 \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1."
     if language_id == "bengali":
         return "Je invoice-gulote age issue chhilo, segulo resolve hoye geche, tai ekhon sudhu payment pending."
     return "The earlier issues on these invoices have already been resolved, so the payments are simply pending now."
@@ -1181,6 +1229,16 @@ def payment_options_text(language_id: str) -> str:
         return (
             "Aapke liye do approved payment options hain: DHL MyBill self-serve portal, "
             "ya Virtual Account Number bank transfer."
+        )
+    if language_id == "marathi":
+        return (
+            "\u0924\u0941\u092e\u091a\u094d\u092f\u093e\u0938\u093e\u0920\u0940 \u0926\u094b\u0928 approved payment options \u0906\u0939\u0947\u0924: DHL MyBill self-serve portal, "
+            "\u0915\u093f\u0902\u0935\u093e Virtual Account Number bank transfer."
+        )
+    if language_id == "tamil":
+        return (
+            "\u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 approved payment options \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0b89\u0bb3\u0bcd\u0bb3\u0ba9: DHL MyBill self-serve portal, "
+            "\u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Virtual Account Number bank transfer."
         )
     if language_id == "bengali":
         return (
@@ -1211,6 +1269,16 @@ def invoice_summary_line(invoice: dict[str, Any], language_id: str) -> str:
             f"Invoice {invoice.get('invoice_no')} {amount} ki hai, "
             f"jo {overdue_days} din se overdue hai aur due date {due_date} thi."
         )
+    if language_id == "marathi":
+        return (
+            f"Invoice {invoice.get('invoice_no')} {amount} \u091a\u093e \u0906\u0939\u0947, "
+            f"\u091c\u094b {overdue_days} \u0926\u093f\u0935\u0938 overdue \u0906\u0939\u0947 \u0906\u0923\u093f due date {due_date} \u0939\u094b\u0924\u0940."
+        )
+    if language_id == "tamil":
+        return (
+            f"Invoice {invoice.get('invoice_no')} {amount}, "
+            f"\u0b87\u0ba4\u0bc1 {overdue_days} days overdue \u0b86\u0b95 \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1, due date {due_date}."
+        )
     if language_id == "bengali":
         return (
             f"Invoice {invoice.get('invoice_no')} {amount}, "
@@ -1234,6 +1302,16 @@ def total_summary_text(customer: dict[str, Any], invoices: list[dict[str, Any]],
         return (
             f"Main isliye call kar raha hoon kyunki {company} ke DHL account par total {total} ka outstanding hai "
             f"aur {len(invoices)} invoices overdue hain."
+        )
+    if language_id == "marathi":
+        return (
+            f"\u092e\u0940 call \u0915\u0930\u0924 \u0906\u0939\u0947 \u0915\u093e\u0930\u0923 {company} \u091a\u094d\u092f\u093e DHL account \u0935\u0930 total {total} \u091a\u0902 outstanding \u0906\u0939\u0947 "
+            f"\u0906\u0923\u093f {len(invoices)} invoices overdue \u0906\u0939\u0947\u0924."
+        )
+    if language_id == "tamil":
+        return (
+            f"\u0ba8\u0bbe\u0ba9\u0bcd call \u0b9a\u0bc6\u0baf\u0bcd\u0bb5\u0ba4\u0bb1\u0bcd\u0b95\u0bbe\u0ba9 \u0b95\u0bbe\u0bb0\u0ba3\u0bae\u0bcd {company} DHL account-\u0bb2\u0bcd total {total} outstanding \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1 "
+            f"\u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd {len(invoices)} invoices overdue \u0b86\u0b95 \u0b89\u0bb3\u0bcd\u0bb3\u0ba9."
         )
     if language_id == "bengali":
         return (
@@ -1262,6 +1340,16 @@ def opening_purpose_text(
             f"Ji, dhanyavaad. {intro} Main aapke credit account ke regarding {agent_calling_phrase(voice)}. "
             f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
+    if language_id == "marathi":
+        return (
+            f"\u0927\u0928\u094d\u092f\u0935\u093e\u0926. {intro} \u092e\u0940 \u0924\u0941\u092e\u091a\u094d\u092f\u093e DHL credit account \u0938\u0902\u0926\u0930\u094d\u092d\u093e\u0924 call \u0915\u0930\u0924 \u0906\u0939\u0947. "
+            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
+        ).strip()
+    if language_id == "tamil":
+        return (
+            f"\u0ba8\u0ba9\u0bcd\u0bb1\u0bbf. {intro} \u0ba8\u0bbe\u0ba9\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd DHL credit account \u0baa\u0bb1\u0bcd\u0bb1\u0bbf call \u0b9a\u0bc6\u0baf\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. "
+            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
+        ).strip()
     if language_id == "bengali":
         return (
             f"Dhonnobad confirm korar jonno. {intro} Ami apnar credit account niye call korchi. "
@@ -1278,6 +1366,10 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
     if not interesting:
         if language_id == "hinglish":
             return "In invoices par koi prior dispute logged nahin hai. Sirf payment abhi pending hai."
+        if language_id == "marathi":
+            return "\u092f\u093e invoices \u0935\u0930 \u0915\u094b\u0923\u0924\u093e\u0939\u0940 prior dispute logged \u0928\u093e\u0939\u0940. \u0938\u0927\u094d\u092f\u093e \u092b\u0915\u094d\u0924 payment pending \u0906\u0939\u0947."
+        if language_id == "tamil":
+            return "\u0b87\u0ba8\u0bcd\u0ba4 invoices-\u0b95\u0bcd\u0b95\u0bc1 prior dispute \u0b8f\u0ba4\u0bc1\u0bae\u0bcd logged \u0b87\u0bb2\u0bcd\u0bb2\u0bc8. payment \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd pending \u0b86\u0b95 \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1."
         if language_id == "bengali":
             return "Ei invoice-gulor upor kono prior dispute nei. Sudhu payment pending."
         return "There are no prior disputes on these invoices. Payment is simply pending."
@@ -1288,6 +1380,14 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
         if language_id == "hinglish":
             lines.append(
                 f"{invoice.get('invoice_no')} par pehle issue tha, lekin woh resolve ho chuka hai aur credit note issue ho chuka hai."
+            )
+        elif language_id == "marathi":
+            lines.append(
+                f"{invoice.get('invoice_no')} \u0935\u0930 \u0906\u0927\u0940 issue \u0939\u094b\u0924\u093e, \u092a\u0923 \u0924\u094b resolve \u091d\u093e\u0932\u093e \u0906\u0939\u0947 \u0906\u0923\u093f credit note issue \u091d\u093e\u0932\u0947 \u0906\u0939\u0947."
+            )
+        elif language_id == "tamil":
+            lines.append(
+                f"{invoice.get('invoice_no')} \u0baa\u0bb1\u0bcd\u0bb1\u0bbf \u0bae\u0bc1\u0ba9\u0bcd\u0ba9\u0bb0\u0bcd issue \u0b87\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0ba4\u0bc1, \u0b86\u0ba9\u0bbe\u0bb2\u0bcd \u0b85\u0ba4\u0bc1 resolve \u0b86\u0b95\u0bbf\u0bb5\u0bbf\u0b9f\u0bcd\u0b9f\u0ba4\u0bc1 \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd credit note issue \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0ba4\u0bc1."
             )
         elif language_id == "bengali":
             lines.append(
@@ -1300,6 +1400,10 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
         if any("confirmed receipt" in str(item).lower() for item in history):
             if language_id == "hinglish":
                 lines.append(f"Aapki taraf se credit note receipt bhi confirm ho chuki thi for {invoice.get('invoice_no')}.")
+            elif language_id == "marathi":
+                lines.append(f"{invoice.get('invoice_no')} sathi credit note receipt dekhil confirm \u091d\u093e\u0932\u0940 \u0939\u094b\u0924\u0940.")
+            elif language_id == "tamil":
+                lines.append(f"{invoice.get('invoice_no')} \u0b95\u0bcd\u0b95\u0bbe\u0ba9 credit note receipt-um confirm \u0b86\u0b95\u0bbf\u0bb5\u0bbf\u0b9f\u0bcd\u0b9f\u0ba4\u0bc1.")
             elif language_id == "bengali":
                 lines.append(f"{invoice.get('invoice_no')} er credit note receipt-o confirm kora hoyechhilo.")
             else:
@@ -1521,6 +1625,10 @@ def generate_collections_reply(
         contact = customer_display_name(customer) or "the accounts payable contact"
         if language_id in {"hinglish", "hindi"}:
             text = f"Good day, {agent_intro_text(language_id, voice)} Kya main {contact} se baat kar raha hoon?"
+        elif language_id == "marathi":
+            text = f"Good day, {agent_intro_text(language_id, voice)} {contact} \u092f\u093e\u0902\u091a\u094d\u092f\u093e\u0938\u094b\u092c\u0924 \u092e\u0940 \u092c\u094b\u0932\u0924 \u0906\u0939\u0947 \u0915\u093e?"
+        elif language_id == "tamil":
+            text = f"Good day, {agent_intro_text(language_id, voice)} {contact} \u0b89\u0b9f\u0ba9\u0bcd \u0baa\u0bc7\u0b9a\u0bc1\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bbe?"
         elif language_id == "bengali":
             text = f"Good day, {agent_intro_text(language_id, voice)} Ami ki {contact}-er sathe kotha bolchi?"
         else:
@@ -2975,7 +3083,7 @@ OUTPUT (strict JSON, no markdown):
 {
   "intent": one of ["greet_identity","state_purpose","explain_invoices","answer_history","payment_options","capture_promise","already_paid","invoice_copy","dispute","cash_flow","approval_pending","wrong_contact","escalate","close","other"],
   "reply": "the exact line the agent will speak, in the chosen language",
-  "language": one of ["english","hinglish","hindi","bengali"],
+  "language": one of ["english","hinglish","hindi","bengali","marathi","tamil"],
   "tool_calls": [ { "name": "<tool>", "args": { ... } } ]   // pick from: log_promise_to_pay, log_already_paid, resend_invoice, log_dispute, update_contact, transfer_to_human. Empty array if no side-effect needed.
 }
 """
@@ -3099,6 +3207,14 @@ def llm_collections_turn(
             "Keep proper nouns like DHL or MyBill in English script only if needed."
         ),
         "bengali": "HARD LANGUAGE LOCK: reply entirely in Bengali. First words must already be Bengali.",
+        "marathi": (
+            "HARD LANGUAGE LOCK: reply entirely in Marathi using Devanagari script. "
+            "Do not drift into Hindi or romanized Marathi. Keep proper nouns like DHL or MyBill in English script only if needed."
+        ),
+        "tamil": (
+            "HARD LANGUAGE LOCK: reply entirely in Tamil using Tamil script. "
+            "Do not answer in English first. Keep proper nouns like DHL or MyBill in English script only if needed."
+        ),
     }.get(suggested, f"Reply in {suggested}.")
 
     ground_truth_doc = load_ground_truth_doc()

@@ -938,7 +938,25 @@ export default function App({ username, onLogout }: AppProps = {}) {
     if (map && map[languageId]) return map[languageId]
     if (languageId === 'english') return 'en-IN'
     if (languageId === 'bengali') return 'bn-IN'
+    if (languageId === 'marathi') return 'mr-IN'
+    if (languageId === 'tamil') return 'ta-IN'
     return 'hi-IN'
+  }
+
+  const languageIdForSarvamCode = (languageCode: string): string | null => {
+    const normalized = languageCode.trim()
+    if (!normalized) return null
+    const map = bootstrapRef.current?.config.sarvam_language_codes
+    if (map) {
+      const entry = Object.entries(map).find(([, value]) => value === normalized)
+      if (entry && entry[0] !== 'hinglish' && entry[0] !== 'hindi') {
+        return entry[0]
+      }
+    }
+    if (normalized === 'bn-IN') return 'bengali'
+    if (normalized === 'mr-IN') return 'marathi'
+    if (normalized === 'ta-IN') return 'tamil'
+    return null
   }
 
   const flushPendingRealtime = () => {
@@ -1868,7 +1886,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
           // Language switch detection still runs per-fragment so the next
           // agent turn uses the right TTS voice.
-          const mapped = languageCode === 'bn-IN' ? 'bengali' : null
+          const mapped = languageIdForSarvamCode(languageCode)
           if (mapped && mapped !== activeLanguageRef.current) {
             activeLanguageRef.current = mapped
             const nextAdvice = defaultLanguageAdvice(mapped)

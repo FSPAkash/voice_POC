@@ -22,6 +22,7 @@ export type ParsedRealtimeFunctionCall = {
 
 const DEVANAGARI_RE = /[\u0900-\u097F]/
 const BENGALI_RE = /[\u0980-\u09FF]/
+const TAMIL_RE = /[\u0B80-\u0BFF]/
 const HINGLISH_IN_ENGLISH_RE =
   /\b(?:aap|accha|acha|haan|haanji|hanji|ji|hoon|hai|main|mein|mera|meri|kar(?:ta|ti|unga|ungi)?|raha|rahi|rahe|bilkul|namaste|theek|thik|kya|kyun|nahi|nahin|matlab|samjha|samjhi|dheere|paisa|paise|rupaye|thoda|bahut|abhi|phir|kuch|sahi|galat|lekin|magar|wala|wali|hamaare|hamare|aage|badhoon|pehle|baad)\b/i
 const ROMANIZED_HINDI_RE =
@@ -107,6 +108,12 @@ export function buildOpeningText(
   if (lowerLabel === 'hindi') {
     return `नमस्कार, मैं ${agentName} DHL Express India से बोल ${isFemale ? 'रही' : 'रहा'} हूँ। क्या मैं ${contact} से बात कर ${isFemale ? 'रही' : 'रहा'} हूँ?`
   }
+  if (lowerLabel === 'marathi') {
+    return `\u0928\u092e\u0938\u094d\u0915\u093e\u0930, \u092e\u0940 ${agentName}, DHL Express India \u092e\u0927\u0942\u0928 \u092c\u094b\u0932\u0924 \u0906\u0939\u0947. ${contact} \u092f\u093e\u0902\u091a\u094d\u092f\u093e\u0938\u094b\u092c\u0924 \u092e\u0940 \u092c\u094b\u0932\u0924 \u0906\u0939\u0947 \u0915\u093e?`
+  }
+  if (lowerLabel === 'tamil') {
+    return `\u0bb5\u0ba3\u0b95\u0bcd\u0b95\u0bae\u0bcd, \u0ba8\u0bbe\u0ba9\u0bcd ${agentName}, DHL Express India-\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0baa\u0bc7\u0b9a\u0bc1\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. ${contact} \u0b89\u0b9f\u0ba9\u0bcd \u0baa\u0bc7\u0b9a\u0bc1\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bbe?`
+  }
   if (lowerLabel === 'bengali') {
     return `${greeting}, ami ${agentName}, DHL Express India theke bolchi. Ami ki ${contact}-er sathe kotha bolchi?`
   }
@@ -186,6 +193,8 @@ export function buildGuidedResponse(
 
   const englishOnly = suggestedLanguage.id === 'english'
   const bengaliOnly = suggestedLanguage.id === 'bengali'
+  const marathiOnly = suggestedLanguage.id === 'marathi'
+  const tamilOnly = suggestedLanguage.id === 'tamil'
   const invoiceBlock = renderInvoiceFacts(invoiceFacts)
   const instructions = [
     context === 'tool_followup'
@@ -204,6 +213,12 @@ export function buildGuidedResponse(
       : '',
     bengaliOnly
       ? 'CRITICAL: Reply in Bengali immediately. Do not first say in English that you will switch. Your first words must already be in Bengali.'
+      : '',
+    marathiOnly
+      ? 'CRITICAL: Reply in Marathi immediately using Devanagari script. Do not drift into Hindi or romanized Marathi.'
+      : '',
+    tamilOnly
+      ? 'CRITICAL: Reply in Tamil immediately using Tamil script. Do not answer in English first and switch later.'
       : '',
     `Detected customer language: ${detectedLanguage.label}.`,
     `Transcript quality: ${languageAdvice.transcript_quality}. Confidence: ${languageAdvice.confidence}.`,
@@ -254,12 +269,27 @@ export function detectLanguageComplianceIssue(
     }
   }
 
+  if (languageAdvice.suggested_language_id === 'marathi') {
+    if (!DEVANAGARI_RE.test(normalized) || ROMANIZED_HINDI_RE.test(normalized)) {
+      return 'The reply violated the Marathi script lock. Repair in Marathi using Devanagari immediately.'
+    }
+  }
+
   if (languageAdvice.suggested_language_id === 'bengali') {
     const hasBengaliScript = BENGALI_RE.test(normalized)
     const promisedInsteadOfSwitched =
       LANGUAGE_PROMISE_RE.test(normalized) && /\b(?:bengali|bangla)\b/i.test(normalized)
     if (!hasBengaliScript || promisedInsteadOfSwitched) {
       return 'The reply did not switch into Bengali immediately. Repair in Bengali right now.'
+    }
+  }
+
+  if (languageAdvice.suggested_language_id === 'tamil') {
+    const hasTamilScript = TAMIL_RE.test(normalized)
+    const promisedInsteadOfSwitched =
+      LANGUAGE_PROMISE_RE.test(normalized) && /\b(?:tamil|thamizh)\b/i.test(normalized)
+    if (!hasTamilScript || promisedInsteadOfSwitched) {
+      return 'The reply did not switch into Tamil immediately. Repair in Tamil right now.'
     }
   }
 
@@ -274,6 +304,8 @@ export function buildLanguageRepairResponse(
   const suggestedLanguage = languageById(languages, languageAdvice.suggested_language_id)
   const englishOnly = suggestedLanguage.id === 'english'
   const bengaliOnly = suggestedLanguage.id === 'bengali'
+  const marathiOnly = suggestedLanguage.id === 'marathi'
+  const tamilOnly = suggestedLanguage.id === 'tamil'
 
   return {
     type: 'response.create',
@@ -290,6 +322,12 @@ export function buildLanguageRepairResponse(
           : '',
         bengaliOnly
           ? 'Reply in Bengali immediately. Your first words must already be in Bengali.'
+          : '',
+        marathiOnly
+          ? 'Reply in Marathi immediately using Devanagari script. Do not drift into Hindi or romanized text.'
+          : '',
+        tamilOnly
+          ? 'Reply in Tamil immediately using Tamil script. Do not start in English and switch later.'
           : '',
         languageAdvice.transcript_quality === 'suspect'
           ? 'If you are unsure what the customer said, ask them to repeat themselves in the required language.'
