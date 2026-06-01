@@ -1,15 +1,15 @@
 {
   "agent": {
     "model": "bulbul:v3",
-    "events": 5,
+    "events": 2,
     "response_usage": {
       "text_input_tokens": 0,
       "text_cached_input_tokens": 0,
-      "text_output_tokens": 874,
+      "text_output_tokens": 239,
       "audio_input_tokens": 0,
       "audio_cached_input_tokens": 0,
       "audio_output_tokens": 0,
-      "estimated_cost_usd": 0.027275
+      "estimated_cost_usd": 0.007458
     },
     "transcription_usage": {
       "model": "saaras:v3",
@@ -18,8 +18,8 @@
       "text_output_tokens": 0,
       "estimated_cost_usd": 0.0
     },
-    "total_tokens": 874,
-    "estimated_cost_usd": 0.027275
+    "total_tokens": 239,
+    "estimated_cost_usd": 0.007458
   },
   "supervisor": {
     "model": "deterministic-supervisor",
@@ -41,21 +41,18 @@
   },
   "chat_agent": {
     "model": "gpt-4.1",
-    "events": 8,
-    "text_input_tokens": 11478,
-    "text_cached_input_tokens": 23040,
-    "text_output_tokens": 752,
-    "total_tokens": 35270,
-    "estimated_cost_usd": 0.040492
+    "events": 2,
+    "text_input_tokens": 8910,
+    "text_cached_input_tokens": 0,
+    "text_output_tokens": 136,
+    "total_tokens": 9046,
+    "estimated_cost_usd": 0.018908
   },
   "processed_usage_event_ids": [
-    "tts_utt_z6rg77bv",
-    "tts_utt_llrd7q6u",
-    "tts_utt_hdt00kjz",
-    "tts_utt_pkv7i0tl",
-    "tts_utt_8vtvcjns"
+    "tts_utt_bjozi1e1",
+    "tts_utt_7wp4y00g"
   ],
-  "session_id": "cost_session_463ffdd6fbbf",
-  "updated_at": "2026-05-29T06:51:31.364750+00:00",
+  "session_id": "cost_session_d473f99659b0",
+  "updated_at": "2026-06-01T06:50:18.535052+00:00",
   "price_table_version": "openai+sarvam-pricing-2026-05-29"
 }

@@ -18,8 +18,8 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(persona["name"], "Yogesh")
         self.assertEqual(persona["gender"], "male")
 
-    def test_default_male_voice_is_ratan(self) -> None:
-        self.assertEqual(policy_app.DEFAULT_REALTIME_VOICE, "ratan")
+    def test_default_male_voice_is_shubh(self) -> None:
+        self.assertEqual(policy_app.DEFAULT_REALTIME_VOICE, "shubh")
 
     def test_hinglish_stt_prefers_auto_detect(self) -> None:
         self.assertEqual(policy_app.sarvam_stt_language_code("hinglish"), "unknown")
@@ -91,6 +91,40 @@ class PolicyEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(spoken, "Invoice DHL 123456. Invoice DHL 654321")
+
+    def test_prepare_sarvam_tts_text_preserves_number_commas(self) -> None:
+        spoken = policy_app.prepare_sarvam_tts_text(
+            "Outstanding amount is INR 57,920.",
+            "en-IN",
+        )
+
+        self.assertEqual(spoken, "Outstanding amount is INR 57,920.")
+
+    def test_localized_sarvam_voice_prefers_language_specific_speaker(self) -> None:
+        self.assertEqual(policy_app.localized_sarvam_voice("ratan", "hi-IN"), "shubh")
+        self.assertEqual(policy_app.localized_sarvam_voice("priya", "bn-IN"), "roopa")
+        self.assertEqual(policy_app.localized_sarvam_voice("ratan", "en-IN"), "ratan")
+
+    def test_scrub_forbidden_payment_methods_preserves_cash_flow_language(self) -> None:
+        cleaned = policy_app.scrub_forbidden_payment_methods(
+            "I understand cash flow is tight right now."
+        )
+
+        self.assertEqual(cleaned, "I understand cash flow is tight right now.")
+
+    def test_scrub_forbidden_payment_methods_preserves_check_with_your_boss(self) -> None:
+        cleaned = policy_app.scrub_forbidden_payment_methods(
+            "Please check with your boss and let me know tomorrow."
+        )
+
+        self.assertEqual(cleaned, "Please check with your boss and let me know tomorrow.")
+
+    def test_scrub_forbidden_payment_methods_rewrites_explicit_cash_payment_instruction(self) -> None:
+        cleaned = policy_app.scrub_forbidden_payment_methods(
+            "You can make payment by cash tomorrow."
+        )
+
+        self.assertEqual(cleaned, "You can make payment via DHL MyBill tomorrow.")
 
     def test_chat_turn_route_accepts_messages_without_explicit_transcript(self) -> None:
         client = policy_app.app.test_client()

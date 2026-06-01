@@ -117,8 +117,10 @@ REALTIME_MODEL = SARVAM_TTS_MODEL
 REALTIME_TRANSCRIPTION_MODEL = SARVAM_STT_MODEL
 SARVAM_TTS_SAMPLE_RATE = _env_int("SARVAM_TTS_SAMPLE_RATE", 24000, minimum=8000, maximum=48000)
 SARVAM_STT_SAMPLE_RATE = _env_int("SARVAM_STT_SAMPLE_RATE", 16000, minimum=8000, maximum=16000)
-SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.1, minimum=0.5, maximum=2.0)
-SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.45, minimum=0.01, maximum=1.0)
+# Bulbul sounds more natural for collections when nudged a touch faster and
+# less over-controlled. Keep these overridable from env for quick A/B testing.
+SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.08, minimum=0.5, maximum=2.0)
+SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.68, minimum=0.01, maximum=1.0)
 SARVAM_TTS_MIN_BUFFER_SIZE = _env_int("SARVAM_TTS_MIN_BUFFER_SIZE", 30, minimum=30, maximum=200)
 SARVAM_TTS_MAX_CHUNK_LENGTH = _env_int("SARVAM_TTS_MAX_CHUNK_LENGTH", 200, minimum=30, maximum=400)
 SARVAM_TTS_OUTPUT_CODEC = (os.environ.get("SARVAM_TTS_OUTPUT_CODEC", "linear16") or "linear16").strip().lower()
@@ -168,9 +170,50 @@ SARVAM_VOICES = [
     {"id": "mani", "label": "Mani (male, broad coverage)", "gender": "male"},
 ]
 
+SARVAM_RECOMMENDED_MALE_VOICE_BY_LANGUAGE = {
+    "en-IN": "ratan",
+    "hi-IN": "shubh",
+    "te-IN": "shubh",
+    "kn-IN": "shubh",
+    "bn-IN": "rehan",
+    "ta-IN": "ratan",
+    "od-IN": "shubh",
+    "ml-IN": "shubh",
+    "mr-IN": "ratan",
+    "pa-IN": "mani",
+    "gu-IN": "ratan",
+}
+
+SARVAM_RECOMMENDED_FEMALE_VOICE_BY_LANGUAGE = {
+    "en-IN": "ishita",
+    "hi-IN": "priya",
+    "te-IN": "priya",
+    "kn-IN": "ishita",
+    "bn-IN": "roopa",
+    "ta-IN": "ishita",
+    "od-IN": "ritu",
+    "ml-IN": "pooja",
+    "mr-IN": "priya",
+    "pa-IN": "roopa",
+    "gu-IN": "priya",
+}
+
 
 def persona_for_voice(voice: str | None) -> dict[str, str]:
     return VOICE_PERSONAS.get((voice or DEFAULT_REALTIME_VOICE).lower(), DEFAULT_PERSONA)
+
+
+def localized_sarvam_voice(voice: str | None, language_code: str | None) -> str:
+    requested = (voice or DEFAULT_REALTIME_VOICE).strip().lower()
+    if requested not in VOICE_PERSONAS:
+        requested = DEFAULT_REALTIME_VOICE
+    gender = persona_for_voice(requested)["gender"]
+    mapping = (
+        SARVAM_RECOMMENDED_FEMALE_VOICE_BY_LANGUAGE
+        if gender == "female"
+        else SARVAM_RECOMMENDED_MALE_VOICE_BY_LANGUAGE
+    )
+    return mapping.get((language_code or "").strip(), requested)
 
 
 # App language_id -> Sarvam BCP-47 code.
@@ -202,9 +245,10 @@ def sarvam_stt_language_code(language_id: str | None) -> str:
 
 
 def sarvam_tts_options(language_code: str, voice: str) -> dict[str, Any]:
+    localized_voice = localized_sarvam_voice(voice, language_code)
     options: dict[str, Any] = {
         "target_language_code": language_code,
-        "speaker": voice,
+        "speaker": localized_voice,
         "model": SARVAM_TTS_MODEL,
         "speech_sample_rate": SARVAM_TTS_SAMPLE_RATE,
         "pace": SARVAM_TTS_PACE,
@@ -373,7 +417,12 @@ SUPPORTED_LANGUAGE_OPTIONS = [
     {"id": "urdu", "label": "Urdu", "agent_label": "Urdu", "transcription_language": "ur"},
 ]
 SUPPORTED_LANGUAGE_MAP = {item["id"]: item for item in SUPPORTED_LANGUAGE_OPTIONS}
-DEFAULT_LANGUAGE_ID = "hinglish"
+_configured_default_language_id = (os.environ.get("DEFAULT_LANGUAGE_ID", "hinglish") or "hinglish").strip().lower()
+DEFAULT_LANGUAGE_ID = (
+    _configured_default_language_id
+    if _configured_default_language_id in SUPPORTED_LANGUAGE_MAP
+    else "hinglish"
+)
 LANGUAGE_REQUEST_ALIASES: dict[str, tuple[str, ...]] = {
     "english": ("english", "angrezi", "inglish"),
     "hinglish": ("hinglish",),
@@ -1067,9 +1116,9 @@ def prepare_sarvam_tts_text(text: str, language_code: str | None) -> str:
     cleaned = cleaned.replace("•", ". ")
     cleaned = re.sub(r"\s*[;|]\s*", ". ", cleaned)
     cleaned = re.sub(r"\b([A-Za-z]{2,})(\d{3,})\b", r"\1 \2", cleaned)
-    cleaned = re.sub(r"(\d),(?=\d{3}\b)", r"\1", cleaned)
     cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
-    cleaned = re.sub(r"([.,!?])(?=\S)", r"\1 ", cleaned)
+    cleaned = re.sub(r"(?<!\d),(?=\S)", ", ", cleaned)
+    cleaned = re.sub(r"([.!?])(?=\S)", r"\1 ", cleaned)
 
     if (language_code or "").lower() in {"hi-in", "mr-in"}:
         cleaned = cleaned.replace("₹", " INR ")
@@ -1183,7 +1232,7 @@ def agent_calling_phrase(voice: str | None) -> str:
 
 def reason_probe_text(language_id: str) -> str:
     if language_id in {"hinglish", "hindi"}:
-        return "Kya main delay ka reason jaan sakta hoon, taaki main usko sahi tarah note kar sakoon?"
+        return "Payment abhi tak hold kyun hai, thoda bata dijiye. Main note kar leta hoon."
     if language_id == "marathi":
         return "\u0915\u0943\u092a\u092f\u093e \u0935\u093f\u0932\u0902\u092c\u093e\u091a\u0902 \u0915\u093e\u0930\u0923 \u0938\u093e\u0902\u0917\u093e\u0932 \u0915\u093e, \u092e\u094d\u0939\u0923\u091c\u0947 \u092e\u0940 \u0924\u0947 \u0928\u0940\u091f \u0928\u094b\u0902\u0926\u0935\u0942 \u0936\u0915\u0947\u0928?"
     if language_id == "tamil":
@@ -1195,7 +1244,7 @@ def reason_probe_text(language_id: str) -> str:
 
 def payment_date_request_text(language_id: str) -> str:
     if language_id in {"hinglish", "hindi"}:
-        return "Kya aap next 2 business days ke andar ek exact payment date confirm kar sakte hain?"
+        return "Aap payment kab tak release kar paayenge? Next 2 business days ke andar ek clear date bata dijiye."
     if language_id == "marathi":
         return "\u092a\u0941\u0922\u0940\u0932 2 business days \u092e\u0927\u094d\u092f\u0947 \u0928\u0947\u092e\u0915\u0940 payment date confirm \u0915\u0930\u0942 \u0936\u0915\u093e\u0932 \u0915\u093e?"
     if language_id == "tamil":
@@ -1209,7 +1258,7 @@ def resolved_status_summary_text(invoices: list[dict[str, Any]], language_id: st
     if not any(invoice.get("history") for invoice in invoices):
         return ""
     if language_id in {"hinglish", "hindi"}:
-        return "Jin invoices par pehle issues the, woh resolve ho chuke hain, isliye ab sirf payment pending hai."
+        return "Jin invoices par pehle issues the, woh ab resolve ho chuke hain. Ab sirf payment clear hona baaki hai."
     if language_id == "marathi":
         return "\u091c\u094d\u092f\u093e invoices \u0935\u0930 \u0906\u0927\u0940 issues \u0939\u094b\u0924\u0947 \u0924\u0947 resolve \u091d\u093e\u0932\u0947 \u0906\u0939\u0947\u0924, \u092e\u094d\u0939\u0923\u0942\u0928 \u0906\u0924\u093e \u092b\u0915\u094d\u0924 payment pending \u0906\u0939\u0947."
     if language_id == "tamil":
@@ -1222,12 +1271,12 @@ def resolved_status_summary_text(invoices: list[dict[str, Any]], language_id: st
 def payment_options_text(language_id: str) -> str:
     if language_id == "hinglish":
         return (
-            "Aapke liye do approved payment options hain: DHL MyBill self-serve portal, "
+            "Payment ke liye do options hain: DHL MyBill self-serve portal, "
             "ya Virtual Account Number bank transfer."
         )
     if language_id == "hindi":
         return (
-            "Aapke liye do approved payment options hain: DHL MyBill self-serve portal, "
+            "Payment ke liye do options hain: DHL MyBill self-serve portal, "
             "ya Virtual Account Number bank transfer."
         )
     if language_id == "marathi":
@@ -1261,13 +1310,13 @@ def invoice_summary_line(invoice: dict[str, Any], language_id: str) -> str:
     due_date = str(invoice.get("due_date") or "")
     if language_id == "hinglish":
         return (
-            f"Invoice {invoice.get('invoice_no')} {amount} ki hai, "
-            f"jo {overdue_days} din se overdue hai aur due date {due_date} thi."
+            f"Invoice {invoice.get('invoice_no')} ka amount {amount} hai. "
+            f"Due date {due_date} thi, aur yeh ab {overdue_days} din se overdue hai."
         )
     if language_id == "hindi":
         return (
-            f"Invoice {invoice.get('invoice_no')} {amount} ki hai, "
-            f"jo {overdue_days} din se overdue hai aur due date {due_date} thi."
+            f"Invoice {invoice.get('invoice_no')} ka amount {amount} hai. "
+            f"Due date {due_date} thi, aur yeh ab {overdue_days} din se overdue hai."
         )
     if language_id == "marathi":
         return (
@@ -1295,13 +1344,13 @@ def total_summary_text(customer: dict[str, Any], invoices: list[dict[str, Any]],
     company = str(customer.get("company_name") or "your company")
     if language_id == "hinglish":
         return (
-            f"Reason yeh hai ki {company} ke DHL account par total {total} ka outstanding hai "
-            f"across {len(invoices)} overdue invoices."
+            f"{company} ke DHL account par total {total} outstanding hai, "
+            f"aur {len(invoices)} invoices overdue chal rahe hain."
         )
     if language_id == "hindi":
         return (
-            f"Main isliye call kar raha hoon kyunki {company} ke DHL account par total {total} ka outstanding hai "
-            f"aur {len(invoices)} invoices overdue hain."
+            f"{company} ke DHL account par total {total} outstanding hai, "
+            f"aur {len(invoices)} invoices overdue chal rahe hain."
         )
     if language_id == "marathi":
         return (
@@ -1337,7 +1386,7 @@ def opening_purpose_text(
     intro = agent_intro_text(language_id, voice)
     if language_id in {"hinglish", "hindi"}:
         return (
-            f"Ji, dhanyavaad. {intro} Main aapke credit account ke regarding {agent_calling_phrase(voice)}. "
+            f"Ji, thanks. {intro} Main aapki pending payment ke baare mein {agent_calling_phrase(voice)}. "
             f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "marathi":
@@ -1365,7 +1414,7 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
     interesting = [invoice for invoice in invoices if invoice.get("history")]
     if not interesting:
         if language_id == "hinglish":
-            return "In invoices par koi prior dispute logged nahin hai. Sirf payment abhi pending hai."
+            return "In invoices par pehle koi active dispute nahin tha. Ab payment hi pending hai."
         if language_id == "marathi":
             return "\u092f\u093e invoices \u0935\u0930 \u0915\u094b\u0923\u0924\u093e\u0939\u0940 prior dispute logged \u0928\u093e\u0939\u0940. \u0938\u0927\u094d\u092f\u093e \u092b\u0915\u094d\u0924 payment pending \u0906\u0939\u0947."
         if language_id == "tamil":
@@ -1379,7 +1428,7 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
         history = invoice.get("history") or []
         if language_id == "hinglish":
             lines.append(
-                f"{invoice.get('invoice_no')} par pehle issue tha, lekin woh resolve ho chuka hai aur credit note issue ho chuka hai."
+                f"{invoice.get('invoice_no')} par jo pehle issue tha, woh resolve ho chuka hai aur credit note bhi issue ho gaya tha."
             )
         elif language_id == "marathi":
             lines.append(
@@ -1399,7 +1448,7 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
             )
         if any("confirmed receipt" in str(item).lower() for item in history):
             if language_id == "hinglish":
-                lines.append(f"Aapki taraf se credit note receipt bhi confirm ho chuki thi for {invoice.get('invoice_no')}.")
+                lines.append(f"Aapki side se credit note receipt bhi confirm ho chuki thi for {invoice.get('invoice_no')}.")
             elif language_id == "marathi":
                 lines.append(f"{invoice.get('invoice_no')} sathi credit note receipt dekhil confirm \u091d\u093e\u0932\u0940 \u0939\u094b\u0924\u0940.")
             elif language_id == "tamil":
@@ -1696,7 +1745,7 @@ def generate_collections_reply(
             (
                 "That is why I am calling today, and I would like to understand why payment has not been made yet."
                 if language_id == "english"
-                else "Isi wajah se main aaj call kar raha hoon, aur samajhna chahta hoon ki payment ab tak kyon nahin hui."
+                else "Isi liye call kiya hai. Payment abhi tak clear kyun nahin hui, yeh samajhna tha."
             ),
         ]
         return (" ".join(part for part in parts if part), tool_calls, DETERMINISTIC_CHAT_MODEL)
@@ -1707,7 +1756,7 @@ def generate_collections_reply(
         ask = (
             "With those issues resolved, may I ask what is holding the payment back now?"
             if language_id == "english"
-            else "Ab jab yeh issues resolve ho chuke hain, kya main pooch sakta hoon ki payment ab tak kyon hold hai?"
+            else "Ab jab yeh issues resolve ho chuke hain, payment abhi tak hold kyun hai?"
         )
         return (f"{text} {ask}", tool_calls, DETERMINISTIC_CHAT_MODEL)
 
@@ -1716,7 +1765,7 @@ def generate_collections_reply(
         line = invoice_summary_line(target_invoice, language_id) if target_invoice else ""
         if language_id in {"hinglish", "hindi"}:
             return (
-                f"Theek hai, ek-ek karke batata hoon. {line} Kya is invoice ke liye payment date confirm kar sakte hain?",
+                f"Theek hai, ek-ek karke batata hoon. {line} Iske liye payment kab tak release hogi?",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1740,7 +1789,7 @@ def generate_collections_reply(
     if signals["repeat_request"]:
         if language_id in {"hinglish", "hindi"}:
             return (
-                "Maaf kijiye. Main dheere se dohra deta hoon. " + total_summary_text(customer, invoices, language_id),
+                "Sorry, main dheere se dobara bolta hoon. " + total_summary_text(customer, invoices, language_id),
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1753,8 +1802,8 @@ def generate_collections_reply(
     if signals["asks_timeline"]:
         if language_id in {"hinglish", "hindi"}:
             return (
-                "As per agreed terms, yeh invoices already overdue hain. "
-                "Kya aap next 2 business days ke andar ek specific payment date confirm kar sakte hain?",
+                "Yeh invoices already overdue hain. "
+                "Aap next 2 business days ke andar ek clear payment date bata dijiye.",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1768,8 +1817,8 @@ def generate_collections_reply(
         if language_id in {"hinglish", "hindi"}:
             return (
                 "Discount approve karne ka authority mere paas nahin hai. "
-                "Lekin agar aap payment date confirm kar dein, toh main usko note kar sakta hoon. "
-                "Kya aap specific date share karenge?",
+                "Lekin aap payment ki ek clear date de dein, toh main woh note kar leta hoon. "
+                "Aap kaunsi date de sakte hain?",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1793,8 +1842,8 @@ def generate_collections_reply(
             recap = payment_options_text(language_id)
             if language_id in {"hinglish", "hindi"}:
                 return (
-                    f"Thank you. Maine note kar liya hai ki payment {raw_date} tak release hogi. "
-                    f"Please ensure payment us date tak ho jaye. {recap}",
+                    f"Theek hai, maine note kar liya hai ki payment {raw_date} tak release hogi. "
+                    f"Please us date tak payment clear kar dijiye. {recap}",
                     tool_calls,
                     DETERMINISTIC_CHAT_MODEL,
                 )
@@ -1807,7 +1856,7 @@ def generate_collections_reply(
         if language_id in {"hinglish", "hindi"}:
             return (
                 f"{raw_date} thoda zyada door lag raha hai. "
-                "Kya aap next 2 business days ke andar ek specific date confirm kar sakte hain?",
+                "Next 2 business days ke andar ek closer date bata dijiye.",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1831,8 +1880,8 @@ def generate_collections_reply(
         email = constants["proof_of_payment_email"]
         if language_id in {"hinglish", "hindi"}:
             return (
-                f"Understood, thank you. Kya aap transaction reference number aur paid date share kar denge? "
-                f"Please payment proof {email} par email kar dijiye, aur hum 24 hours ke andar verify karenge.",
+                f"Theek hai, thank you. Transaction reference number aur paid date share kar dijiye. "
+                f"Payment proof {email} par email kar dijiye, hum 24 hours ke andar verify kar lenge.",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1854,7 +1903,7 @@ def generate_collections_reply(
             return (
                 f"Bilkul. Aap pehle DHL MyBill portal par registered email se login karke invoice dekh sakte hain. "
                 f"Agar convenient ho, maine {customer.get('registered_email')} par invoice resend bhi trigger kar diya hai. "
-                "Invoice milte hi kindly review karke payment arrange kar dijiye.",
+                "Invoice milte hi please check karke payment arrange kar dijiye.",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -1876,8 +1925,8 @@ def generate_collections_reply(
         tool_calls.append(build_tool_call_entry("log_dispute", args, result))
         if language_id in {"hinglish", "hindi"}:
             return (
-                "I understand your concern. Maine isko dispute ke roop mein log kar diya hai aur concerned team ko route kar diya jayega. "
-                "Agar koi undisputed amount hai, kya aap usko clear kar sakte hain meanwhile?"
+                "Samajh gaya. Main isko dispute ke taur par log kar raha hoon aur concerned team ko bhej diya jayega. "
+                "Agar koi undisputed amount hai, kya aap woh meanwhile clear kar sakte hain?"
             , tool_calls, DETERMINISTIC_CHAT_MODEL)
         return (
             "I understand your concern. I have logged this as a dispute and it will be routed to the concerned team. "
@@ -1898,7 +1947,7 @@ def generate_collections_reply(
         if language_id in {"hinglish", "hindi"}:
             return (
                 "Samajh sakta hoon ki cash flow tight ho sakta hai. "
-                "Kya aap partial payment abhi kar sakte hain, ya full payment ke liye ek specific date confirm kar sakte hain?"
+                "Aap abhi partial payment kar sakte hain, ya full payment ke liye ek clear date de sakte hain?"
             , tool_calls, DETERMINISTIC_CHAT_MODEL)
         return (
             "I understand cash flow can be tight. Could you make a partial payment now, or confirm a specific date for the full payment?",
@@ -1909,8 +1958,8 @@ def generate_collections_reply(
     if signals["approval_pending"]:
         if language_id in {"hinglish", "hindi"}:
             return (
-                "Understood. Kya aap approver ka naam aur expected approval date confirm kar sakte hain? "
-                "Invoice already overdue hai, isliye request hai ki isko priority di jaye."
+                "Theek hai. Approver ka naam aur expected approval date bata dijiye. "
+                "Invoice already overdue hai, isko please priority dijiye."
             , tool_calls, DETERMINISTIC_CHAT_MODEL)
         return (
             "Understood. Could you confirm the approver name and the expected approval date? The invoice is already overdue, so I would request that this be prioritised.",
@@ -1927,8 +1976,8 @@ def generate_collections_reply(
         tool_calls.append(build_tool_call_entry("transfer_to_human", args, result))
         if language_id in {"hinglish", "hindi"}:
             return (
-                "Main aapki position note kar raha hoon. Payment abhi bhi overdue hai, "
-                "isliye main is case ko human collections executive ko follow-up ke liye transfer kar raha hoon."
+                "Theek hai, main aapki position note kar raha hoon. Payment abhi bhi overdue hai, "
+                "isliye yeh case main human collections executive ko follow-up ke liye transfer kar raha hoon."
             , tool_calls, DETERMINISTIC_CHAT_MODEL)
         return (
             "I respect your position. The payment remains overdue, so I am transferring this case to a human collections executive for follow-up.",
@@ -3078,6 +3127,11 @@ HARD RULES (never violate):
 - If the customer is in distress or a safety concern, hand off to human immediately.
 - Match the customer's language. If they speak in plain English, reply in English. Hinglish opening is OK; switch fully on explicit request or a clearly English customer turn.
 - Keep replies short and natural — one short paragraph max. Do not dump every invoice unless the customer explicitly asks for the full list.
+- Sound like a live Indian B2B collections caller, not a translator, legal notice, training script, or chatbot.
+- For Hindi/Hinglish, use spoken Indian business language. Keep common business words like payment, invoice, due date, approval, account, portal, hold, clear, release, and date in English script when that sounds more natural.
+- Avoid bookish or bureaucratic wording such as "कृपया अवगत कराइए", "संदर्भ में", "उक्त", "भुगतान लंबित है", "निराकरण", "व्यवस्था करें", or "कृपया पुष्टि करें". Prefer spoken phrasing like "बताइए", "date share कर दीजिए", "payment अभी तक hold क्यों है?", "issue resolve हो गया", and "payment clear कर दीजिए".
+- Collections tone target: warm, direct, lightly firm, and a little informal. You are calling to secure a payment commitment, not to educate the customer or read a policy memo.
+- Sound like a real phone caller, not a polished corporate announcer. Short everyday phrasing is better than formal phrasing.
 
 OUTPUT (strict JSON, no markdown):
 {
@@ -3198,13 +3252,20 @@ def llm_collections_turn(
         "english": "HARD LANGUAGE LOCK: reply 100% in English. Zero Hindi/Hinglish/Bengali words. No 'aap', 'main', 'hoon', 'kar', 'kya', 'haan', 'ji', 'namaste'. Use only English script and English vocabulary.",
         "hinglish": (
             "HARD LANGUAGE LOCK: reply in Hindi-dominant code-mix. Hindi words MUST be written in Devanagari script. "
-            "Keep brand names or necessary English business words like DHL, MyBill, invoice, line by line in English script. "
+            "Keep brand names and common business words like DHL, MyBill, payment, invoice, due date, approval, account, portal, hold, clear, release, and line by line in English script. "
+            "Sound like a live Indian collections caller on the phone: short, spoken, slightly informal, and natural. "
+            "Prefer phrasing like 'payment अभी तक hold क्यों है?', 'date बता दीजिए', 'मैं note कर लेता हूँ', 'देख लीजिए', and 'payment clear कर दीजिए'. "
+            "Avoid bookish Hindi like 'कृपया अवगत कराइए', 'संदर्भ में', 'भुगतान लंबित है', or 'कृपया पुष्टि करें'. "
+            "Avoid sounding too polished or stiff. Use everyday phone phrasing like 'ठीक है', 'कोई दिक्कत है क्या', 'एक rough date दे दीजिए', and 'मैं note कर लेता हूँ'. "
             "NEVER write romanized Hindi such as 'main', 'aap', 'batao', 'kyun', or 'hoon'."
         ),
         "hindi": (
-            "HARD LANGUAGE LOCK: reply entirely in Hindi using Devanagari script. "
-            "Do not use romanized Hindi like 'main', 'aap', 'batao', or 'kyun'. "
-            "Keep proper nouns like DHL or MyBill in English script only if needed."
+            "HARD LANGUAGE LOCK: reply in spoken Hindi using Devanagari script. "
+            "Keep proper nouns and natural business words like DHL, MyBill, payment, invoice, due date, approval, account, and portal in English script when needed. "
+            "Use simple spoken office Hindi, slightly informal, not literary or bureaucratic Hindi. "
+            "Prefer phrasing like 'payment अभी तक क्यों रुकी है?', 'date बता दीजिए', 'मैं note कर लेता हूँ', and 'ठीक है, समझ गया'. "
+            "Avoid sounding too official or polished. Favor short phone-call wording over formal sentences. "
+            "Do not use romanized Hindi like 'main', 'aap', 'batao', or 'kyun'."
         ),
         "bengali": "HARD LANGUAGE LOCK: reply entirely in Bengali. First words must already be Bengali.",
         "marathi": (
@@ -3240,6 +3301,14 @@ def llm_collections_turn(
         "",
         "TRANSCRIPT SO FAR:",
         *(transcript_lines or ["(no turns yet — this is the very first agent line)"]),
+        "",
+        "STYLE TARGET:",
+        "- Outbound DHL collections call.",
+        "- Spoken, not written.",
+        "- Warm, lightly firm, and slightly informal.",
+        "- No policy-manual Hindi.",
+        "- No lecture, no script-reading, no translator tone.",
+        "- No overly polished or announcer-like phrasing.",
         "",
         "Produce the next agent turn now as JSON per the schema in the system message.",
         "Reminder: every numeric/name/date you state must appear verbatim in the GROUND TRUTH document above. Anything else is a fabrication and forbidden.",
@@ -3375,16 +3444,19 @@ def llm_collections_turn(
     return reply, executed, usage_events, None
 
 
-_FORBIDDEN_PAYMENT_TERMS = (
-    r"\bUPI\b",
-    r"\bcheque\b",
-    r"\bchecks?\b",
-    r"\bcredit card\b",
-    r"\bdebit card\b",
-    r"\bGoogle Pay\b",
-    r"\bPhonePe\b",
-    r"\bPaytm\b",
-    r"\bcash\b",
+_FORBIDDEN_PAYMENT_SUBSTITUTIONS = (
+    (r"\bUPI\b", "DHL MyBill"),
+    (r"\bcheques?\b", "DHL MyBill"),
+    (r"\bcredit card\b", "DHL MyBill"),
+    (r"\bdebit card\b", "DHL MyBill"),
+    (r"\bGoogle Pay\b", "DHL MyBill"),
+    (r"\bPhonePe\b", "DHL MyBill"),
+    (r"\bPaytm\b", "DHL MyBill"),
+    # Keep everyday language intact, but rewrite explicit cash/check payment instructions.
+    (r"\b(?:payment|payments?)\s+(?:by|via|through|with|using|in)\s+(?:cash|check)\b", "payment via DHL MyBill"),
+    (r"\bpay\s+(?:by|via|through|with|using|in)\s+(?:cash|check)\b", "pay via DHL MyBill"),
+    (r"\b(?:cash|check)\s+payment\b", "DHL MyBill payment"),
+    (r"\b(?:via|through|using)\s+(?:cash|check)\b", "via DHL MyBill"),
 )
 
 
@@ -3415,9 +3487,9 @@ def reply_violates_english_lock(text: str) -> bool:
 
 def scrub_forbidden_payment_methods(text: str) -> str:
     cleaned = text
-    for pattern in _FORBIDDEN_PAYMENT_TERMS:
+    for pattern, replacement in _FORBIDDEN_PAYMENT_SUBSTITUTIONS:
         if re.search(pattern, cleaned, re.IGNORECASE):
-            cleaned = re.sub(pattern, "DHL MyBill", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
     return cleaned
 
 
@@ -3720,6 +3792,8 @@ def bootstrap():
     invoices = get_invoices(DEFAULT_ACCOUNT_ID)
     if not customer:
         return error_json(f"Customer fixture {DEFAULT_ACCOUNT_ID} not found.", 500)
+    default_language_code = sarvam_language_code(DEFAULT_LANGUAGE_ID)
+    default_voice = localized_sarvam_voice(DEFAULT_REALTIME_VOICE, default_language_code)
 
     payload = {
         "account_number": DEFAULT_ACCOUNT_ID,
@@ -3727,8 +3801,8 @@ def bootstrap():
         "invoices": invoices,
         "total_outstanding": customer_outstanding(invoices),
         "human_agent": HUMAN_AGENT,
-        "agent_prompt": compose_agent_instructions(DEFAULT_ACCOUNT_ID, DEFAULT_REALTIME_VOICE),
-        "agent_persona": persona_for_voice(DEFAULT_REALTIME_VOICE),
+        "agent_prompt": compose_agent_instructions(DEFAULT_ACCOUNT_ID, default_voice),
+        "agent_persona": persona_for_voice(default_voice),
         "realtime_tools": REALTIME_TOOLS,
         "board": load_board(),
         "costs": ledger_with_combined(load_ledger()),
@@ -3741,7 +3815,7 @@ def bootstrap():
             "supported_realtime_models": [
                 {"id": SARVAM_TTS_MODEL, "label": f"Sarvam Bulbul ({SARVAM_TTS_MODEL})"},
             ],
-            "realtime_voice": DEFAULT_REALTIME_VOICE,
+            "realtime_voice": default_voice,
             "transcription_model": SARVAM_STT_MODEL,
             "supervisor_model": SUPERVISOR_MODEL,
             "language_coach_model": LANGUAGE_COACH_MODEL,
@@ -3771,8 +3845,8 @@ def bootstrap():
             "stt_sample_rate": SARVAM_STT_SAMPLE_RATE,
             "stt_mode": SARVAM_STT_MODE,
             "sarvam_voice_preset": {
-                "id": f"{DEFAULT_REALTIME_VOICE}-collections",
-                "speaker": DEFAULT_REALTIME_VOICE,
+                "id": f"{default_voice}-collections",
+                "speaker": default_voice,
                 "pace": SARVAM_TTS_PACE,
                 "temperature": SARVAM_TTS_TEMPERATURE,
                 "sample_rate": SARVAM_TTS_SAMPLE_RATE,
@@ -3806,15 +3880,19 @@ def create_session():
         return error_json("SARVAM_API_KEY is missing on the backend.", 500)
 
     body = request.get_json(silent=True) or {}
-    voice = str(body.get("voice") or DEFAULT_REALTIME_VOICE)
-    if voice.lower() not in VOICE_PERSONAS:
-        voice = DEFAULT_REALTIME_VOICE
     language_id = str(body.get("language_id") or DEFAULT_LANGUAGE_ID)
+    default_voice = localized_sarvam_voice(DEFAULT_REALTIME_VOICE, sarvam_language_code(language_id))
+    voice = str(body.get("voice") or default_voice)
+    if voice.lower() not in VOICE_PERSONAS:
+        voice = default_voice
+    resolved_tts_voice = localized_sarvam_voice(voice, sarvam_language_code(language_id))
 
     return success_json(
         {
             "session_id": uuid.uuid4().hex,
             "voice": voice,
+            "resolved_tts_voice": resolved_tts_voice,
+            "agent_persona": persona_for_voice(voice),
             "language_id": language_id,
             "language_code": sarvam_language_code(language_id),
             "tts_language_code": sarvam_language_code(language_id),
