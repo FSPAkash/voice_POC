@@ -185,6 +185,13 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(payload["totals"]["total_outstanding_inr"], 57920)
         self.assertEqual(len(payload["invoices"]), 3)
 
+    def test_phone_turn_commit_delay_waits_longer_for_short_fragment(self) -> None:
+        short_delay = policy_app.phone_turn_commit_delay_seconds("हाँ")
+        long_delay = policy_app.phone_turn_commit_delay_seconds("पर पैसा नहीं है")
+
+        self.assertGreater(short_delay, long_delay)
+        self.assertEqual(long_delay, policy_app.PHONE_TURN_COMMIT_DELAY_SECONDS)
+
     def test_phone_session_short_partial_needs_real_speech_before_barge_in(self) -> None:
         session = policy_app.PhoneCallSession(
             session_id="cost_session_phone_test",

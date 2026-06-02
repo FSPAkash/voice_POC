@@ -165,6 +165,11 @@ EXOTEL_STREAM_PATH = (os.environ.get("EXOTEL_STREAM_PATH", "/api/exotel/media") 
 PHONE_STT_MIN_SPEECH_SECONDS = _env_float("PHONE_STT_MIN_SPEECH_SECONDS", 0.15, minimum=0.05, maximum=1.0)
 PHONE_STT_SILENCE_FLUSH_SECONDS = _env_float("PHONE_STT_SILENCE_FLUSH_SECONDS", 0.25, minimum=0.05, maximum=1.0)
 PHONE_TURN_COMMIT_DELAY_SECONDS = _env_float("PHONE_TURN_COMMIT_DELAY_SECONDS", 0.1, minimum=0.0, maximum=1.0)
+PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS = _env_float("PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS", 0.38, minimum=0.0, maximum=1.0)
+PHONE_AMBIENCE_ENABLED = _env_flag("PHONE_AMBIENCE_ENABLED", True)
+PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 0.12, minimum=0.0, maximum=1.0)
+PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.06, minimum=0.0, maximum=1.0)
+PHONE_AMBIENCE_FILE = BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav"
 
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
@@ -1089,6 +1094,20 @@ def should_apply_language_switch_hint(text: str) -> bool:
         return True
     non_ascii_chars = sum(1 for char in trimmed if ord(char) > 127 and not char.isspace())
     return non_ascii_chars >= 4
+
+
+def phone_turn_commit_delay_seconds(text: str) -> float:
+    trimmed = normalize_whitespace(text).strip()
+    if not trimmed:
+        return PHONE_TURN_COMMIT_DELAY_SECONDS
+    if explicit_language_request_language_id(trimmed):
+        return PHONE_TURN_COMMIT_DELAY_SECONDS
+    tokens = stt_word_tokens(trimmed)
+    if len(tokens) <= 1:
+        return max(PHONE_TURN_COMMIT_DELAY_SECONDS, PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS)
+    if len(tokens) <= 2 and not re.search(r"[.?!।]$", trimmed):
+        return max(PHONE_TURN_COMMIT_DELAY_SECONDS, PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS)
+    return PHONE_TURN_COMMIT_DELAY_SECONDS
 
 
 def extract_json_payload(raw_text: str) -> dict[str, Any]:
@@ -5089,6 +5108,72 @@ def _wav_to_pcm(wav_bytes: bytes, *, fallback_sample_rate: int) -> tuple[bytes, 
     return pcm, sample_rate
 
 
+@lru_cache(maxsize=4)
+def load_phone_ambience_pcm(sample_rate: int) -> bytes:
+    if not PHONE_AMBIENCE_ENABLED or not PHONE_AMBIENCE_FILE.exists():
+        return b""
+    import wave
+
+    with wave.open(str(PHONE_AMBIENCE_FILE), "rb") as handle:
+        channels = handle.getnchannels()
+        source_rate = handle.getframerate()
+        sample_width = handle.getsampwidth()
+        frame_count = handle.getnframes()
+        raw = handle.readframes(frame_count)
+
+    if sample_width != 2 or channels not in {1, 2} or source_rate <= 0 or frame_count <= 0:
+        return b""
+
+    frame_size = channels * sample_width
+    output_frames = max(int(frame_count * sample_rate / source_rate), 1)
+    source_view = memoryview(raw)
+    output = bytearray(output_frames * 2)
+
+    for out_index in range(output_frames):
+        src_index = min(frame_count - 1, int(out_index * source_rate / sample_rate))
+        offset = src_index * frame_size
+        if channels == 1:
+            sample = struct.unpack_from("<h", source_view, offset)[0]
+        else:
+            left = struct.unpack_from("<h", source_view, offset)[0]
+            right = struct.unpack_from("<h", source_view, offset + 2)[0]
+            sample = int((left + right) / 2)
+        struct.pack_into("<h", output, out_index * 2, sample)
+    return bytes(output)
+
+
+def apply_pcm16_gain(pcm_bytes: bytes, gain: float) -> bytes:
+    if not pcm_bytes or gain <= 0:
+        return b"\x00" * len(pcm_bytes)
+    if abs(gain - 1.0) < 1e-6:
+        return pcm_bytes
+    sample_count = len(pcm_bytes) // 2
+    source_view = memoryview(pcm_bytes)
+    output = bytearray(len(pcm_bytes))
+    for index in range(sample_count):
+        sample = struct.unpack_from("<h", source_view, index * 2)[0]
+        scaled = max(-32768, min(32767, int(round(sample * gain))))
+        struct.pack_into("<h", output, index * 2, scaled)
+    return bytes(output)
+
+
+def mix_pcm16_le(foreground: bytes, background: bytes) -> bytes:
+    if not foreground or not background:
+        return foreground
+    sample_count = min(len(foreground), len(background)) // 2
+    fg_view = memoryview(foreground)
+    bg_view = memoryview(background)
+    output = bytearray(len(foreground))
+    for index in range(sample_count):
+        fg = struct.unpack_from("<h", fg_view, index * 2)[0]
+        bg = struct.unpack_from("<h", bg_view, index * 2)[0]
+        mixed = max(-32768, min(32767, fg + bg))
+        struct.pack_into("<h", output, index * 2, mixed)
+    if len(foreground) > sample_count * 2:
+        output[sample_count * 2 :] = foreground[sample_count * 2 :]
+    return bytes(output)
+
+
 def _sarvam_stt_rest(pcm: bytes, sample_rate: int, language_code: str) -> tuple[str, str]:
     """Returns (transcript, detected_language_code). Uses Saarika auto-detect
     so the customer can switch languages mid-call without us forcing hi-IN."""
@@ -5186,6 +5271,7 @@ class PhoneCallSession:
         self._current_mark_name: str | None = None
         self._current_response_text: str | None = None
         self._current_tts_serial = 0
+        self._customer_revision = 0
         self._tts_upstream: Any | None = None
         self._playback_finish_timer: threading.Timer | None = None
         self._last_agent_speak_start_at: float | None = None
@@ -5199,6 +5285,9 @@ class PhoneCallSession:
         self._event_log: deque[dict[str, Any]] = deque(maxlen=40)
         self._finalized = False
         self._greeting_started = False
+        self._ambience_cursor_bytes = 0
+        self._ambience_thread: threading.Thread | None = None
+        self._media_send_lock = threading.Lock()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -5274,6 +5363,10 @@ class PhoneCallSession:
                 }
             )
 
+    def _is_customer_revision_current(self, revision: int) -> bool:
+        with self._lock:
+            return not self._stop and revision == self._customer_revision
+
     def _latest_assistant_text(self) -> str:
         with self._lock:
             for entry in reversed(self.transcript):
@@ -5300,6 +5393,77 @@ class PhoneCallSession:
             upstream.close()
         except Exception:
             pass
+
+    def _next_ambience_segment(self, byte_count: int) -> bytes:
+        loop_pcm = load_phone_ambience_pcm(EXOTEL_STREAM_SAMPLE_RATE)
+        if not loop_pcm or byte_count <= 0:
+            return b""
+        with self._lock:
+            cursor = self._ambience_cursor_bytes
+            total = len(loop_pcm)
+            if total <= 0:
+                return b""
+            end = cursor + byte_count
+            if end <= total:
+                segment = loop_pcm[cursor:end]
+            else:
+                wrap = end - total
+                segment = loop_pcm[cursor:] + loop_pcm[:wrap]
+            self._ambience_cursor_bytes = (cursor + byte_count) % total
+        if len(segment) < byte_count:
+            segment = segment + (b"\x00" * (byte_count - len(segment)))
+        return segment
+
+    def _send_pcm_chunk(self, pcm_bytes: bytes, *, ambience_gain: float = 0.0) -> bool:
+        if not pcm_bytes:
+            return False
+        with self._lock:
+            if self._stop or not self.stream_sid:
+                return False
+            stream_sid = self.stream_sid
+        payload_pcm = pcm_bytes
+        if ambience_gain > 0:
+            ambience = self._next_ambience_segment(len(pcm_bytes))
+            if ambience:
+                payload_pcm = mix_pcm16_le(pcm_bytes, apply_pcm16_gain(ambience, ambience_gain))
+        with self._media_send_lock:
+            self._send_json(
+                {
+                    "event": "media",
+                    "stream_sid": stream_sid,
+                    "media": {
+                        "payload": base64.b64encode(payload_pcm).decode("ascii"),
+                    },
+                }
+            )
+        return True
+
+    def _start_ambience_loop(self) -> None:
+        if not PHONE_AMBIENCE_ENABLED or self._ambience_thread is not None and self._ambience_thread.is_alive():
+            return
+        thread = threading.Thread(target=self._ambience_pump, daemon=True)
+        self._ambience_thread = thread
+        thread.start()
+
+    def _ambience_pump(self) -> None:
+        chunk_size = max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.1), 320)
+        sleep_seconds = chunk_size / (2 * max(EXOTEL_STREAM_SAMPLE_RATE, 1))
+        while True:
+            with self._lock:
+                if self._stop:
+                    return
+                playback_active = bool(self._current_response_id or self._current_mark_name or self._tts_upstream)
+                stream_ready = bool(self.stream_sid)
+            if not stream_ready or playback_active:
+                time.sleep(0.05)
+                continue
+            ambience = self._next_ambience_segment(chunk_size)
+            if ambience:
+                try:
+                    self._send_pcm_chunk(apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN), ambience_gain=0.0)
+                except Exception:
+                    return
+            time.sleep(sleep_seconds)
 
     def _complete_active_playback(self, serial: int, mark_name: str, source: str) -> bool:
         with self._lock:
@@ -5463,15 +5627,7 @@ class PhoneCallSession:
                     if not logged_first_audio:
                         logged_first_audio = True
                         self.log_event("tts_first_audio", {"source": "sarvam_stream"})
-                    self._send_json(
-                        {
-                            "event": "media",
-                            "stream_sid": stream_sid,
-                            "media": {
-                                "payload": base64.b64encode(chunk).decode("ascii"),
-                            },
-                        }
-                    )
+                    self._send_pcm_chunk(chunk, ambience_gain=PHONE_AMBIENCE_TTS_GAIN)
                     continue
                 if ptype == "error":
                     raise RuntimeError(str(data.get("message") or "Sarvam upstream error")[:200])
@@ -5523,15 +5679,7 @@ class PhoneCallSession:
                     logged_first_audio = True
                     self.log_event("tts_first_audio", {"source": "sarvam_rest_fallback"})
                 try:
-                    self._send_json(
-                        {
-                            "event": "media",
-                            "stream_sid": stream_sid,
-                            "media": {
-                                "payload": base64.b64encode(chunk).decode("ascii"),
-                            },
-                        }
-                    )
+                    self._send_pcm_chunk(chunk, ambience_gain=PHONE_AMBIENCE_TTS_GAIN)
                 except Exception:
                     return
         finally:
@@ -5799,11 +5947,13 @@ class PhoneCallSession:
         self._handle_language_detection(detected_code, trimmed)
         self._append_transcript("customer", trimmed)
         with self._lock:
+            self._customer_revision += 1
             self._turn_commit_buffer.append(trimmed)
+            pending_text = " ".join(self._turn_commit_buffer).strip()
             timer = self._turn_commit_timer
         if timer is not None:
             timer.cancel()
-        next_timer = threading.Timer(PHONE_TURN_COMMIT_DELAY_SECONDS, self._commit_buffered_turn)
+        next_timer = threading.Timer(phone_turn_commit_delay_seconds(pending_text), self._commit_buffered_turn)
         next_timer.daemon = True
         with self._lock:
             self._turn_commit_timer = next_timer
@@ -5814,9 +5964,10 @@ class PhoneCallSession:
             merged = " ".join(self._turn_commit_buffer).strip()
             self._turn_commit_buffer = []
             self._turn_commit_timer = None
+            revision = self._customer_revision
         if not merged or is_likely_stt_hallucination(merged):
             return
-        threading.Thread(target=self._run_unified_customer_turn, args=(merged,), daemon=True).start()
+        threading.Thread(target=self._run_unified_customer_turn, args=(merged, revision), daemon=True).start()
 
     def _message_history(self) -> list[dict[str, str]]:
         with self._lock:
@@ -5830,9 +5981,12 @@ class PhoneCallSession:
         with self._lock:
             return deepcopy(self.transcript[-6:])
 
-    def _run_unified_customer_turn(self, transcript_text: str) -> None:
+    def _run_unified_customer_turn(self, transcript_text: str, revision: int) -> None:
         turn_started_at = time.time()
-        self.log_event("turn_processing_started", {"text": transcript_text[:120]})
+        self.log_event("turn_processing_started", {"text": transcript_text[:120], "revision": revision})
+        if not self._is_customer_revision_current(revision):
+            self.log_event("turn_processing_dropped", {"reason": "stale_before_start", "revision": revision})
+            return
         advice, _, lc_error = create_language_coach_review(
             {
                 "transcript": transcript_text,
@@ -5845,6 +5999,9 @@ class PhoneCallSession:
             self._append_transcript("system", f"Language coach error: {lc_error}")
             return
         next_language_id = supported_render_language_id(advice.get("suggested_language_id") or self.active_language_id)
+        if not self._is_customer_revision_current(revision):
+            self.log_event("turn_processing_dropped", {"reason": "stale_after_language_coach", "revision": revision})
+            return
         with self._lock:
             self.language_advice = advice
             self.active_language_id = next_language_id
@@ -5858,6 +6015,14 @@ class PhoneCallSession:
             coaching_hints=self.coaching_hints[:5],
             language_advice=advice,
         )
+        for usage in usage_events:
+            try:
+                record_chat_agent_usage(CHAT_MODEL, usage)
+            except Exception:
+                pass
+        if not self._is_customer_revision_current(revision):
+            self.log_event("turn_processing_dropped", {"reason": "stale_after_chat", "revision": revision})
+            return
         self.log_event(
             "turn_processing_finished",
             {
@@ -5865,13 +6030,9 @@ class PhoneCallSession:
                 "has_reply": bool(text and text.strip()),
                 "tool_call_count": len(tool_calls),
                 "error": bool(error),
+                "revision": revision,
             },
         )
-        for usage in usage_events:
-            try:
-                record_chat_agent_usage(CHAT_MODEL, usage)
-            except Exception:
-                pass
         if error and not text and not tool_calls:
             self._append_transcript("system", f"Call policy error: {error}")
             return
@@ -5934,6 +6095,7 @@ class PhoneCallSession:
                 self.started_at = utc_now()
             self.status = "connected"
         self.log_event("stream_started", {"stream_sid": self.stream_sid})
+        self._start_ambience_loop()
         self.start_greeting()
 
     def update_status(self, payload: dict[str, Any]) -> None:
