@@ -1783,6 +1783,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
       startTransition(() => setCosts(resetCosts))
 
       const session = await createRealtimeSession({
+        session_id: resetCosts.session_id,
         voice: snapshot.config.realtime_voice,
         language_id: selectedLanguageRef.current,
       })
@@ -1983,6 +1984,15 @@ export default function App({ username, onLogout }: AppProps = {}) {
     setCallState('ending')
     closeMediaResources()
 
+    await flushPendingCostEvents()
+    try {
+      const syncedCosts = await fetchCosts()
+      costsRef.current = syncedCosts
+      startTransition(() => setCosts(syncedCosts))
+    } catch {
+      // Best effort. We'll fall back to the latest local snapshot below.
+    }
+
     const startedAt = sessionStartRef.current ?? Date.now()
     const endedAt = Date.now()
     let finalCosts: CostState | null = null
@@ -2028,13 +2038,28 @@ export default function App({ username, onLogout }: AppProps = {}) {
       }
 
       try {
+        const durationSec = Math.max(0, Math.round((endedAt - startedAt) / 1000))
+        const loggedCosts = finalCosts ?? costsRef.current
         await logCall({
           account_number: bootstrapRef.current.account_number,
           disposition: dispositionRef.current,
           transcript: transcriptRef.current,
           tool_calls: toolCallsRef.current,
+          duration_sec: durationSec,
+          cost_usd: loggedCosts.combined.estimated_cost_usd,
+          total_units: loggedCosts.combined.total_tokens,
+          costs: loggedCosts,
           summary: summary ?? undefined,
         })
+      } catch {
+        // Best effort.
+      }
+
+      try {
+        const syncedCosts = await fetchCosts()
+        finalCosts = syncedCosts
+        costsRef.current = syncedCosts
+        startTransition(() => setCosts(syncedCosts))
       } catch {
         // Best effort.
       }
@@ -3001,7 +3026,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                       <span>This call</span>
                       <p>
                         {formatUsd(costs.combined.estimated_cost_usd)} ·{' '}
-                        {formatElapsed(elapsed)} · {formatNumber(costs.combined.total_tokens)} tok
+                        {formatElapsed(elapsed)} · {formatNumber(costs.combined.total_tokens)} units
                       </p>
                     </div>
                     {callSummary.agent_tone_assessment ? (
@@ -3127,7 +3152,7 @@ function WrapUpView({ history }: { history: CallRecord[] }) {
           <strong>{formatUsd(totalCost)}</strong>
         </div>
         <div className="wrap-stat">
-          <span>Total tokens</span>
+          <span>Total units</span>
           <strong>{formatNumber(totalTokens)}</strong>
         </div>
       </header>
@@ -3155,7 +3180,7 @@ function WrapUpView({ history }: { history: CallRecord[] }) {
                 <div className="wrap-card__metrics">
                   <span>{formatElapsed(rec.durationSec)}</span>
                   <strong>{formatUsd(rec.costUsd)}</strong>
-                  <span>{formatNumber(rec.totalTokens)} tok</span>
+                  <span>{formatNumber(rec.totalTokens)} units</span>
                 </div>
               </div>
               {rec.summary ? (

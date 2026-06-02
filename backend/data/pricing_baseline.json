@@ -1,0 +1,19 @@
+{
+  "source": "real completed call captured on 2026-06-02 (call_4a6691e4de)",
+  "duration_sec": 125,
+  "cost_usd": 0.159526,
+  "total_units": 49906,
+  "costs": {
+    "sarvam_tts_cost_usd": 0.073901,
+    "sarvam_stt_cost_usd": 0.010661,
+    "chat_cost_usd": 0.074964,
+    "supervisor_cost_usd": 0.0,
+    "language_coach_cost_usd": 0.0,
+    "combined_cost_usd": 0.159526,
+    "combined_units": 49906,
+    "sarvam_tts_chars": 2368,
+    "sarvam_stt_seconds": 123,
+    "chat_input_tokens": 29926,
+    "chat_output_tokens": 849
+  }
+}

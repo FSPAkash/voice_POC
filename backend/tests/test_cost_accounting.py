@@ -148,6 +148,42 @@ class CostAccountingTests(unittest.TestCase):
         expected = pricing_app.PRICE_TABLE["saaras:v3"]["audio_input_per_million"] / 1_000_000
         self.assertTrue(math.isclose(cost, expected, rel_tol=0, abs_tol=1e-12))
 
+    def test_current_stack_pricing_snapshot_matches_ledger_math(self) -> None:
+        ledger = pricing_app.default_ledger(
+            realtime_model="bulbul:v3",
+            transcription_model="saaras:v3",
+        )
+        ledger["agent"]["response_usage"]["text_output_tokens"] = 239
+        ledger["agent"]["response_usage"]["estimated_cost_usd"] = 0.007458
+        ledger["agent"]["transcription_usage"]["audio_input_tokens"] = 3
+        ledger["agent"]["transcription_usage"]["estimated_cost_usd"] = 0.00026
+        ledger["chat_agent"] = {
+            "model": "gpt-4.1",
+            "events": 2,
+            "text_input_tokens": 8910,
+            "text_cached_input_tokens": 0,
+            "text_output_tokens": 136,
+            "total_tokens": 9046,
+            "estimated_cost_usd": 0.018908,
+        }
+
+        snapshot = pricing_app.current_stack_pricing_snapshot(ledger)
+
+        self.assertEqual(snapshot["stack"]["tts_model"], pricing_app.SARVAM_TTS_MODEL)
+        self.assertEqual(snapshot["stack"]["stt_model"], pricing_app.SARVAM_STT_MODEL)
+        self.assertEqual(snapshot["observed"]["sarvam_tts_chars"], 239)
+        self.assertEqual(snapshot["observed"]["sarvam_stt_seconds"], 3)
+        self.assertEqual(snapshot["observed"]["chat_input_tokens"], 8910)
+        self.assertEqual(snapshot["observed"]["combined_units"], 9288)
+        self.assertTrue(
+            math.isclose(
+                snapshot["observed"]["combined_cost_usd"],
+                0.007458 + 0.00026 + 0.018908,
+                rel_tol=0,
+                abs_tol=1e-12,
+            )
+        )
+
     def test_load_ledger_backfills_missing_nested_fields(self) -> None:
         pricing_app.write_json(
             pricing_app.LEDGER_FILE,

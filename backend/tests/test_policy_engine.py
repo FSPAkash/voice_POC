@@ -84,6 +84,21 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(config["pricing_reference"]["sarvam"]["currency"], "INR")
         self.assertEqual(config["pricing_reference"]["openai_currency"], "USD")
 
+    def test_create_session_reuses_requested_cost_session_id(self) -> None:
+        client = policy_app.app.test_client()
+
+        response = client.post(
+            "/api/session",
+            json={
+                "session_id": "cost_session_test_123",
+                "language_id": "hinglish",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["session_id"], "cost_session_test_123")
+
     def test_prepare_sarvam_tts_text_improves_invoice_speech(self) -> None:
         spoken = policy_app.prepare_sarvam_tts_text(
             "Invoice DHL123456; Invoice DHL654321",

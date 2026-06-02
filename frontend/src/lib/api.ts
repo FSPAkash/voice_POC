@@ -33,6 +33,7 @@ export function fetchBootstrap() {
 }
 
 export function createRealtimeSession(body: {
+  session_id?: string
   voice?: string
   language_id?: string
 }) {
@@ -187,6 +188,10 @@ export function logCall(body: {
   disposition: string
   transcript: TranscriptEntry[]
   tool_calls: ToolCallEntry[]
+  duration_sec?: number
+  cost_usd?: number
+  total_units?: number
+  costs?: CostState
   summary?: CallSummary
   notes?: string
 }) {

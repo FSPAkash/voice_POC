@@ -2608,6 +2608,81 @@ def sarvam_stt_cost_from_seconds(model: str, seconds: float) -> tuple[float, dic
     return cost, {"audio_input_tokens": secs}
 
 
+def current_stack_pricing_snapshot(ledger: dict[str, Any] | None = None) -> dict[str, Any]:
+    base = load_ledger() if ledger is None else ledger
+    priced = ledger_with_combined(recompute_ledger_totals(base))
+    agent = priced["agent"]
+    chat_agent = priced.get("chat_agent") or base_chat_ledger()
+    supervisor = priced["supervisor"]
+    language_coach = priced["language_coach"]
+
+    return {
+        "price_table_version": PRICE_TABLE_VERSION,
+        "stack": {
+            "tts_model": SARVAM_TTS_MODEL,
+            "stt_model": SARVAM_STT_MODEL,
+            "chat_model": CHAT_MODEL,
+            "supervisor_model": SUPERVISOR_MODEL,
+            "language_coach_model": LANGUAGE_COACH_MODEL,
+        },
+        "rates": {
+            "sarvam": {
+                "currency": "INR",
+                "inr_per_usd": SARVAM_INR_PER_USD,
+                "tts_inr_per_10k_chars": {
+                    "bulbul:v3": SARVAM_BULBUL_V3_INR_PER_10K_CHARS,
+                    "bulbul:v2": SARVAM_BULBUL_V2_INR_PER_10K_CHARS,
+                },
+                "stt_inr_per_hour": {
+                    "saaras:v3": SARVAM_STT_INR_PER_HOUR,
+                    "saarika:v2.5": SARVAM_STT_INR_PER_HOUR,
+                    "saarika:v2": SARVAM_STT_INR_PER_HOUR,
+                },
+            },
+            "openai": {
+                CHAT_MODEL: PRICE_TABLE.get(price_table_key_for_model(CHAT_MODEL), {}),
+                SUPERVISOR_MODEL: PRICE_TABLE.get(price_table_key_for_model(SUPERVISOR_MODEL), {}),
+                LANGUAGE_COACH_MODEL: PRICE_TABLE.get(price_table_key_for_model(LANGUAGE_COACH_MODEL), {}),
+            },
+        },
+        "metering": {
+            "sarvam_tts_field": "agent.response_usage.text_output_tokens",
+            "sarvam_stt_field": "agent.transcription_usage.audio_input_tokens",
+            "chat_input_field": "chat_agent.text_input_tokens",
+            "chat_cached_input_field": "chat_agent.text_cached_input_tokens",
+            "chat_output_field": "chat_agent.text_output_tokens",
+            "combined_units_field": "combined.total_tokens",
+            "combined_cost_field": "combined.estimated_cost_usd",
+        },
+        "observed": {
+            "session_id": priced.get("session_id", ""),
+            "sarvam_tts_chars": int(agent["response_usage"]["text_output_tokens"]),
+            "sarvam_tts_cost_usd": float(agent["response_usage"]["estimated_cost_usd"]),
+            "sarvam_stt_seconds": int(agent["transcription_usage"]["audio_input_tokens"]),
+            "sarvam_stt_cost_usd": float(agent["transcription_usage"]["estimated_cost_usd"]),
+            "chat_input_tokens": int(chat_agent.get("text_input_tokens", 0)),
+            "chat_cached_input_tokens": int(chat_agent.get("text_cached_input_tokens", 0)),
+            "chat_output_tokens": int(chat_agent.get("text_output_tokens", 0)),
+            "chat_cost_usd": float(chat_agent.get("estimated_cost_usd", 0.0)),
+            "supervisor_cost_usd": float(supervisor["estimated_cost_usd"]),
+            "language_coach_cost_usd": float(language_coach["estimated_cost_usd"]),
+            "combined_units": int(priced["combined"]["total_tokens"]),
+            "combined_cost_usd": float(priced["combined"]["estimated_cost_usd"]),
+        },
+        "notes": {
+            "dashboard_ground_truth": (
+                "The dashboard total is the source of truth for any completed call. "
+                "Sarvam speech is metered on actual chars/seconds; OpenAI is metered on actual tokens."
+            ),
+            "deterministic_components": [
+                "Supervisor review is deterministic in the current backend path unless it returns usage.",
+                "Language coaching is deterministic in the current backend path unless it returns usage.",
+                "Call summary is deterministic in the current backend path unless it returns usage.",
+            ],
+        },
+    }
+
+
 def load_sap_fixture() -> dict[str, Any]:
     return load_json(SAP_FILE, {})
 
@@ -2730,40 +2805,46 @@ def remember_usage_event(ledger: dict[str, Any], event_id: str | None) -> None:
         del processed[:-MAX_PROCESSED_USAGE_EVENT_IDS]
 
 
-def save_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
+def recompute_ledger_totals(ledger: dict[str, Any]) -> dict[str, Any]:
+    normalized = merge_missing_defaults(deepcopy(ledger), default_ledger())
     agent_total = (
-        float(ledger["agent"]["response_usage"]["estimated_cost_usd"])
-        + float(ledger["agent"]["transcription_usage"]["estimated_cost_usd"])
+        float(normalized["agent"]["response_usage"]["estimated_cost_usd"])
+        + float(normalized["agent"]["transcription_usage"]["estimated_cost_usd"])
     )
-    ledger["agent"]["estimated_cost_usd"] = round(agent_total, 6)
-    ledger["price_table_version"] = PRICE_TABLE_VERSION
-    ledger["agent"]["total_tokens"] = (
+    normalized["agent"]["estimated_cost_usd"] = round(agent_total, 6)
+    normalized["price_table_version"] = PRICE_TABLE_VERSION
+    normalized["agent"]["total_tokens"] = (
         sum(
             int(value)
-            for key, value in ledger["agent"]["response_usage"].items()
+            for key, value in normalized["agent"]["response_usage"].items()
             if key.endswith("_tokens")
         )
-        + int(ledger["agent"]["transcription_usage"]["audio_input_tokens"])
-        + int(ledger["agent"]["transcription_usage"].get("text_input_tokens", 0))
-        + int(ledger["agent"]["transcription_usage"]["text_output_tokens"])
+        + int(normalized["agent"]["transcription_usage"]["audio_input_tokens"])
+        + int(normalized["agent"]["transcription_usage"].get("text_input_tokens", 0))
+        + int(normalized["agent"]["transcription_usage"]["text_output_tokens"])
     )
-    ledger["supervisor"]["total_tokens"] = (
-        int(ledger["supervisor"]["text_input_tokens"])
-        + int(ledger["supervisor"]["text_cached_input_tokens"])
-        + int(ledger["supervisor"]["text_output_tokens"])
+    normalized["supervisor"]["total_tokens"] = (
+        int(normalized["supervisor"]["text_input_tokens"])
+        + int(normalized["supervisor"]["text_cached_input_tokens"])
+        + int(normalized["supervisor"]["text_output_tokens"])
     )
-    ledger["language_coach"]["total_tokens"] = (
-        int(ledger["language_coach"]["text_input_tokens"])
-        + int(ledger["language_coach"]["text_cached_input_tokens"])
-        + int(ledger["language_coach"]["text_output_tokens"])
+    normalized["language_coach"]["total_tokens"] = (
+        int(normalized["language_coach"]["text_input_tokens"])
+        + int(normalized["language_coach"]["text_cached_input_tokens"])
+        + int(normalized["language_coach"]["text_output_tokens"])
     )
-    chat_bucket = ledger.setdefault("chat_agent", base_chat_ledger())
+    chat_bucket = normalized.setdefault("chat_agent", base_chat_ledger())
     chat_bucket["total_tokens"] = (
         int(chat_bucket.get("text_input_tokens", 0))
         + int(chat_bucket.get("text_cached_input_tokens", 0))
         + int(chat_bucket.get("text_output_tokens", 0))
     )
-    ledger["updated_at"] = utc_now_iso()
+    normalized["updated_at"] = utc_now_iso()
+    return normalized
+
+
+def save_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
+    ledger = recompute_ledger_totals(ledger)
     write_json(LEDGER_FILE, ledger)
     return ledger
 
@@ -3880,16 +3961,18 @@ def create_session():
         return error_json("SARVAM_API_KEY is missing on the backend.", 500)
 
     body = request.get_json(silent=True) or {}
+    requested_session_id = str(body.get("session_id") or "").strip()
     language_id = str(body.get("language_id") or DEFAULT_LANGUAGE_ID)
     default_voice = localized_sarvam_voice(DEFAULT_REALTIME_VOICE, sarvam_language_code(language_id))
     voice = str(body.get("voice") or default_voice)
     if voice.lower() not in VOICE_PERSONAS:
         voice = default_voice
     resolved_tts_voice = localized_sarvam_voice(voice, sarvam_language_code(language_id))
+    session_id = requested_session_id or uuid.uuid4().hex
 
     return success_json(
         {
-            "session_id": uuid.uuid4().hex,
+            "session_id": session_id,
             "voice": voice,
             "resolved_tts_voice": resolved_tts_voice,
             "agent_persona": persona_for_voice(voice),
@@ -4477,6 +4560,10 @@ def call_log():
         "disposition": payload.get("disposition"),
         "transcript": payload.get("transcript", []),
         "tool_calls": payload.get("tool_calls", []),
+        "duration_sec": int(payload.get("duration_sec", 0) or 0),
+        "cost_usd": float(payload.get("cost_usd", 0.0) or 0.0),
+        "total_units": int(payload.get("total_units", 0) or 0),
+        "costs": payload.get("costs") or {},
         "summary": payload.get("summary") or {},
         "notes": payload.get("notes", ""),
         "timestamp": utc_now_iso(),

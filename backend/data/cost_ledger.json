@@ -1,25 +1,25 @@
 {
   "agent": {
     "model": "bulbul:v3",
-    "events": 2,
+    "events": 10,
     "response_usage": {
       "text_input_tokens": 0,
       "text_cached_input_tokens": 0,
-      "text_output_tokens": 239,
+      "text_output_tokens": 2368,
       "audio_input_tokens": 0,
       "audio_cached_input_tokens": 0,
       "audio_output_tokens": 0,
-      "estimated_cost_usd": 0.007458
+      "estimated_cost_usd": 0.073901
     },
     "transcription_usage": {
       "model": "saaras:v3",
-      "audio_input_tokens": 0,
+      "audio_input_tokens": 123,
       "text_input_tokens": 0,
       "text_output_tokens": 0,
-      "estimated_cost_usd": 0.0
+      "estimated_cost_usd": 0.010661
     },
-    "total_tokens": 239,
-    "estimated_cost_usd": 0.007458
+    "total_tokens": 2491,
+    "estimated_cost_usd": 0.084562
   },
   "supervisor": {
     "model": "deterministic-supervisor",
@@ -41,18 +41,35 @@
   },
   "chat_agent": {
     "model": "gpt-4.1",
-    "events": 2,
-    "text_input_tokens": 8910,
-    "text_cached_input_tokens": 0,
-    "text_output_tokens": 136,
-    "total_tokens": 9046,
-    "estimated_cost_usd": 0.018908
+    "events": 10,
+    "text_input_tokens": 29926,
+    "text_cached_input_tokens": 16640,
+    "text_output_tokens": 849,
+    "total_tokens": 47415,
+    "estimated_cost_usd": 0.074964
   },
   "processed_usage_event_ids": [
-    "tts_utt_bjozi1e1",
-    "tts_utt_7wp4y00g"
+    "tts_utt_y1lojb7a",
+    "stt_76d43bea35",
+    "tts_utt_718h9skj",
+    "stt_1fdc662c87",
+    "tts_utt_8vq6y2xw",
+    "stt_b93642b806",
+    "tts_utt_ejlvj2nd",
+    "stt_4886ab7765",
+    "tts_utt_o4hcfqoz",
+    "stt_d629d472f5",
+    "tts_utt_cg3tlkym",
+    "stt_da67bc82b8",
+    "tts_utt_4eshzkpe",
+    "stt_ab0fcb5327",
+    "tts_utt_ja3v6bec",
+    "stt_f015344c75",
+    "tts_utt_fkz45y5v",
+    "stt_ba5a397abc",
+    "tts_utt_hb5b5gux"
   ],
-  "session_id": "cost_session_d473f99659b0",
-  "updated_at": "2026-06-01T06:50:18.535052+00:00",
+  "session_id": "cost_session_cee0b897e7a0",
+  "updated_at": "2026-06-02T04:30:17.592391+00:00",
   "price_table_version": "openai+sarvam-pricing-2026-05-29"
 }
