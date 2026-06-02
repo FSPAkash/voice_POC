@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 import base64
+import struct
 import threading
 import time
 
@@ -152,7 +153,7 @@ EXOTEL_API_BASE_URL = _normalize_https_base_url(
     "https://api.in.exotel.com",
 )
 EXOTEL_CALLER_ID = (os.environ.get("EXOTEL_CALLER_ID", "") or "").strip()
-EXOTEL_STREAM_SAMPLE_RATE = _env_int("EXOTEL_STREAM_SAMPLE_RATE", 16000, minimum=8000, maximum=24000)
+EXOTEL_STREAM_SAMPLE_RATE = 8000
 EXOTEL_STREAM_PATH = (os.environ.get("EXOTEL_STREAM_PATH", "/api/exotel/media") or "/api/exotel/media").strip() or "/api/exotel/media"
 
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
@@ -4906,8 +4907,6 @@ def stt_stream(ws):
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     """Wrap raw int16 PCM in a minimal RIFF/WAV header."""
-    import struct
-
     num_samples = len(pcm) // 2
     byte_rate = sample_rate * 2
     block_align = 2
@@ -4917,6 +4916,17 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     header += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, byte_rate, block_align, 16)
     header += b"data" + struct.pack("<I", data_size)
     return header + pcm
+
+
+def pcm16_rms(pcm_bytes: bytes) -> float:
+    if not pcm_bytes or len(pcm_bytes) < 2:
+        return 0.0
+    sample_count = len(pcm_bytes) // 2
+    if sample_count <= 0:
+        return 0.0
+    samples = struct.unpack("<" + ("h" * sample_count), pcm_bytes[: sample_count * 2])
+    energy = sum(sample * sample for sample in samples)
+    return math.sqrt(energy / sample_count)
 
 
 def _wav_to_pcm(wav_bytes: bytes, *, fallback_sample_rate: int) -> tuple[bytes, int]:
@@ -5034,6 +5044,9 @@ class PhoneCallSession:
         self._stt_upstream: Any | None = None
         self._stt_thread: threading.Thread | None = None
         self._stt_audio_seconds_unbilled = 0.0
+        self._speech_seconds_since_flush = 0.0
+        self._silence_seconds_since_speech = 0.0
+        self._flush_sent_for_current_pause = False
         self._event_log: deque[dict[str, Any]] = deque(maxlen=40)
         self._finalized = False
         self._greeting_started = False
@@ -5266,12 +5279,26 @@ class PhoneCallSession:
                 self._stt_upstream = None
             if reset_billing:
                 self._stt_audio_seconds_unbilled = 0.0
+                self._speech_seconds_since_flush = 0.0
+                self._silence_seconds_since_speech = 0.0
+                self._flush_sent_for_current_pause = False
         if upstream is None:
             return
         try:
             upstream.close()
         except Exception:
             pass
+
+    def _request_stt_flush(self) -> None:
+        with self._lock:
+            upstream = self._stt_upstream
+        if upstream is None:
+            return
+        try:
+            upstream.send(json.dumps({"type": "flush"}))
+            self.log_event("stt_flush", {})
+        except Exception:
+            self._close_stt_upstream(upstream)
 
     def _open_stt_upstream(self) -> Any:
         def _connect(language_code: str) -> Any:
@@ -5364,6 +5391,9 @@ class PhoneCallSession:
                 with self._lock:
                     seconds = self._stt_audio_seconds_unbilled
                     self._stt_audio_seconds_unbilled = 0.0
+                    self._speech_seconds_since_flush = 0.0
+                    self._silence_seconds_since_speech = 0.0
+                    self._flush_sent_for_current_pause = False
                 if seconds > 0:
                     try:
                         record_sarvam_stt_usage(
@@ -5380,6 +5410,7 @@ class PhoneCallSession:
         if not pcm_bytes:
             return
         chunk_seconds = len(pcm_bytes) / (2 * max(EXOTEL_STREAM_SAMPLE_RATE, 1))
+        rms = pcm16_rms(pcm_bytes)
         payload = json.dumps(
             {
                 "audio": {
@@ -5401,6 +5432,20 @@ class PhoneCallSession:
         if sent:
             with self._lock:
                 self._stt_audio_seconds_unbilled += chunk_seconds
+                if rms >= 350:
+                    self._speech_seconds_since_flush += chunk_seconds
+                    self._silence_seconds_since_speech = 0.0
+                    self._flush_sent_for_current_pause = False
+                elif self._speech_seconds_since_flush > 0:
+                    self._silence_seconds_since_speech += chunk_seconds
+                    should_flush = (
+                        self._silence_seconds_since_speech >= 0.45
+                        and self._speech_seconds_since_flush >= 0.25
+                        and not self._flush_sent_for_current_pause
+                    )
+                    if should_flush:
+                        self._flush_sent_for_current_pause = True
+                        threading.Thread(target=self._request_stt_flush, daemon=True).start()
 
     def _handle_partial_transcript(self, text: str, detected_code: str) -> None:
         trimmed = normalize_whitespace(text).strip()

@@ -119,7 +119,7 @@ After your GitHub push redeploys, set these env vars in the Render service:
 - `EXOTEL_API_BASE_URL`
 Default: `https://api.in.exotel.com`
 - `EXOTEL_STREAM_SAMPLE_RATE`
-Default: `16000`
+Default: `8000`
 - `RENDER_EXTERNAL_URL`
 Example: `https://dhl-poc.onrender.com`
 
