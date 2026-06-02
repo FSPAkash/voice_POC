@@ -97,6 +97,15 @@ def _env_float(name: str, default: float, minimum: float | None = None, maximum:
         value = min(maximum, value)
     return value
 
+
+def _normalize_https_base_url(raw: str | None, default: str) -> str:
+    value = (raw or default or "").strip()
+    if not value:
+        value = default
+    if not re.match(r"^[a-z][a-z0-9+\-.]*://", value, re.IGNORECASE):
+        value = f"https://{value.lstrip('/')}"
+    return value.rstrip("/")
+
 # Sarvam — replaces OpenAI realtime for both STT and TTS.
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 SARVAM_BASE_URL = os.environ.get("SARVAM_BASE_URL", "https://api.sarvam.ai")
@@ -137,7 +146,10 @@ if SARVAM_STT_MODE not in {"transcribe", "translate", "verbatim", "translit", "c
 EXOTEL_ACCOUNT_SID = (os.environ.get("EXOTEL_ACCOUNT_SID", "") or "").strip()
 EXOTEL_API_KEY = (os.environ.get("EXOTEL_API_KEY", "") or "").strip()
 EXOTEL_API_TOKEN = (os.environ.get("EXOTEL_API_TOKEN", "") or "").strip()
-EXOTEL_API_BASE_URL = (os.environ.get("EXOTEL_API_BASE_URL", "https://api.in.exotel.com") or "https://api.in.exotel.com").rstrip("/")
+EXOTEL_API_BASE_URL = _normalize_https_base_url(
+    os.environ.get("EXOTEL_API_BASE_URL"),
+    "https://api.in.exotel.com",
+)
 EXOTEL_CALLER_ID = (os.environ.get("EXOTEL_CALLER_ID", "") or "").strip()
 EXOTEL_STREAM_SAMPLE_RATE = _env_int("EXOTEL_STREAM_SAMPLE_RATE", 16000, minimum=8000, maximum=24000)
 EXOTEL_STREAM_PATH = (os.environ.get("EXOTEL_STREAM_PATH", "/api/exotel/media") or "/api/exotel/media").strip() or "/api/exotel/media"

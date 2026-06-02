@@ -103,6 +103,11 @@ class PolicyEngineTests(unittest.TestCase):
             f"wss://dhl-poc.onrender.com{policy_app.EXOTEL_STREAM_PATH}?session_id=cost_session_phone_123&sample-rate={policy_app.EXOTEL_STREAM_SAMPLE_RATE}",
         )
 
+    def test_normalize_https_base_url_adds_scheme_when_missing(self) -> None:
+        normalized = policy_app._normalize_https_base_url("api.exotel.com", "https://api.in.exotel.com")
+
+        self.assertEqual(normalized, "https://api.exotel.com")
+
     def test_build_exotel_connect_payload_targets_bidirectional_stream(self) -> None:
         payload = policy_app.build_exotel_connect_payload(
             to_number="+91 9136152622",
