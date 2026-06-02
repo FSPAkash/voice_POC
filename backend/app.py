@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode
+from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 import base64
@@ -381,7 +382,7 @@ def build_exotel_connect_payload(
         "CallerId": sanitize_phone_number(caller_id, keep_plus=False),
         "StatusCallback": status_callback_url,
         "StatusCallbackMethod": "POST",
-        "StatusCallbackEvents[0]": "terminal",
+        "StatusCallbackEvents[]": "terminal",
         "StreamUrl": stream_url,
         "StreamType": "bidirectional",
         "StreamTimeout": "86400",
@@ -4180,6 +4181,7 @@ def create_session():
 
 @app.get("/api/exotel/calls/active")
 def exotel_active_call():
+    prune_stale_phone_call_sessions()
     active_snapshot = None
     recent_snapshot = None
     with PHONE_CALL_SESSIONS_LOCK:
@@ -4259,17 +4261,31 @@ def exotel_start_call():
             502,
         )
 
+    raw_response_text = response.text[:4000]
     try:
         exotel_payload = response.json()
     except ValueError:
-        exotel_payload = {"raw_response": response.text[:400]}
-    call_info = exotel_payload.get("Call") if isinstance(exotel_payload, dict) else None
-    if not isinstance(call_info, dict):
-        call_info = exotel_payload if isinstance(exotel_payload, dict) else {}
-    call_sid = str(call_info.get("Sid") or call_info.get("sid") or call_info.get("CallSid") or "").strip()
+        exotel_payload = {"raw_response": raw_response_text}
+    call_sid = parse_exotel_call_sid(exotel_payload if isinstance(exotel_payload, dict) else None, raw_response_text)
     session.register_call_sid(call_sid)
     session.log_event("dial_requested", {"call_sid": call_sid, "exotel_response": exotel_payload})
     return success_json({"ok": True, "session": session.snapshot(), "exotel": exotel_payload}, 202)
+
+
+@app.post("/api/exotel/calls/reset")
+def exotel_reset_call():
+    body = request.get_json(silent=True) or {}
+    session_id = str(body.get("session_id") or "").strip()
+    call_sid = str(body.get("call_sid") or "").strip()
+    session = get_phone_call_session(session_id=session_id or None, call_sid=call_sid or None)
+    if session is None:
+        with PHONE_CALL_SESSIONS_LOCK:
+            active_sessions = [candidate for candidate in PHONE_CALL_SESSIONS.values() if candidate.snapshot()["active"]]
+        session = active_sessions[0] if active_sessions else None
+    if session is None:
+        return success_json({"ok": True, "cleared": False})
+    session.finish("manually_reset")
+    return success_json({"ok": True, "cleared": True, "session": session.snapshot()})
 
 
 @app.post("/api/exotel/status")
@@ -4882,10 +4898,14 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     return header + pcm
 
 
-def _wav_to_pcm(wav_bytes: bytes) -> tuple[bytes, int]:
+def _wav_to_pcm(wav_bytes: bytes, *, fallback_sample_rate: int) -> tuple[bytes, int]:
     import io
     import wave
 
+    if not wav_bytes.startswith(b"RIFF"):
+        # Sarvam returns raw PCM when output_audio_codec=linear16. Only try WAV
+        # decoding when the response actually carries a RIFF header.
+        return wav_bytes, fallback_sample_rate
     with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
         sample_rate = handle.getframerate()
         pcm = handle.readframes(handle.getnframes())
@@ -4917,6 +4937,27 @@ def _sarvam_stt_rest(pcm: bytes, sample_rate: int, language_code: str) -> tuple[
     transcript = str(payload.get("transcript") or "").strip()
     detected = str(payload.get("language_code") or language_code or "hi-IN").strip()
     return transcript, detected
+
+
+def parse_exotel_call_sid(payload: dict[str, Any] | None, raw_text: str | None = None) -> str:
+    if isinstance(payload, dict):
+        call_info = payload.get("Call") if isinstance(payload.get("Call"), dict) else payload
+        if isinstance(call_info, dict):
+            for key in ("Sid", "sid", "CallSid", "call_sid"):
+                value = str(call_info.get(key) or "").strip()
+                if value:
+                    return value
+    raw = str(raw_text or "").strip()
+    if not raw:
+        return ""
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError:
+        return ""
+    sid_node = root.find(".//Sid")
+    if sid_node is None or sid_node.text is None:
+        return ""
+    return sid_node.text.strip()
 
 
 PHONE_CALL_SESSIONS: dict[str, "PhoneCallSession"] = {}
@@ -5135,7 +5176,10 @@ class PhoneCallSession:
                 language_code,
                 sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
             )
-            pcm_bytes, _ = _wav_to_pcm(wav_bytes)
+            pcm_bytes, _ = _wav_to_pcm(
+                wav_bytes,
+                fallback_sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
+            )
         except Exception as exc:  # noqa: BLE001
             self._append_transcript("system", f"Sarvam TTS error: {str(exc)[:200]}")
             self.log_event("tts_error", {"message": str(exc)[:200]})
@@ -5588,7 +5632,23 @@ def get_phone_call_session(*, session_id: str | None = None, call_sid: str | Non
     return None
 
 
+def prune_stale_phone_call_sessions(timeout_seconds: int = 90) -> None:
+    with PHONE_CALL_SESSIONS_LOCK:
+        sessions = list(PHONE_CALL_SESSIONS.values())
+    now = utc_now()
+    for session in sessions:
+        snapshot = session.snapshot()
+        if not snapshot["active"]:
+            continue
+        if snapshot["started_at"]:
+            continue
+        created_at = session.created_at
+        if (now - created_at).total_seconds() >= timeout_seconds:
+            session.finish("startup_timeout")
+
+
 def has_active_phone_call_session() -> bool:
+    prune_stale_phone_call_sessions()
     with PHONE_CALL_SESSIONS_LOCK:
         for session in PHONE_CALL_SESSIONS.values():
             snapshot = session.snapshot()

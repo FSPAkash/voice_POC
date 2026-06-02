@@ -119,7 +119,27 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(payload["From"], "+919136152622")
         self.assertEqual(payload["CallerId"], "02246182014")
         self.assertEqual(payload["StreamType"], "bidirectional")
-        self.assertEqual(payload["StatusCallbackEvents[0]"], "terminal")
+        self.assertEqual(payload["StatusCallbackEvents[]"], "terminal")
+
+    def test_parse_exotel_call_sid_reads_xml_response(self) -> None:
+        raw = """<?xml version="1.0" encoding="UTF-8"?>
+<TwilioResponse>
+ <Call>
+  <Sid>2642ec17f2cf0921cb2a2d4022171a62</Sid>
+ </Call>
+</TwilioResponse>"""
+
+        call_sid = policy_app.parse_exotel_call_sid(None, raw)
+
+        self.assertEqual(call_sid, "2642ec17f2cf0921cb2a2d4022171a62")
+
+    def test_wav_to_pcm_accepts_raw_linear16_payload(self) -> None:
+        pcm = b"\x00\x01\x02\x03"
+
+        converted, sample_rate = policy_app._wav_to_pcm(pcm, fallback_sample_rate=16000)
+
+        self.assertEqual(converted, pcm)
+        self.assertEqual(sample_rate, 16000)
 
     def test_create_session_reuses_requested_cost_session_id(self) -> None:
         client = policy_app.app.test_client()
