@@ -33,6 +33,18 @@ def fmt_usd4(value: float) -> str:
     return f"${value:.4f}"
 
 
+def fmt_inr(value: float, digits: int = 2) -> str:
+    return f"₹{value:,.{digits}f}"
+
+
+def fmt_usd_with_inr(value: float, inr_per_usd: float, usd_digits: int = 4, inr_digits: int = 2) -> str:
+    return f"{fmt_usd(value, usd_digits)} ({fmt_inr(value * inr_per_usd, inr_digits)})"
+
+
+def fmt_usd_rate_with_inr(value: float, inr_per_usd: float, usd_digits: int = 2, inr_digits: int = 2) -> str:
+    return f"${value:.{usd_digits}f} ({fmt_inr(value * inr_per_usd, inr_digits)})"
+
+
 def fmt_int(value: int) -> str:
     return f"{int(value):,}"
 
@@ -77,6 +89,7 @@ def _normalize_logged_costs(costs: dict[str, Any]) -> dict[str, Any]:
         "sarvam_tts_chars": int(response.get("text_output_tokens", 0) or 0),
         "sarvam_stt_seconds": int(transcription.get("audio_input_tokens", 0) or 0),
         "chat_input_tokens": int(chat_agent.get("text_input_tokens", 0) or 0),
+        "chat_cached_input_tokens": int(chat_agent.get("text_cached_input_tokens", 0) or 0),
         "chat_output_tokens": int(chat_agent.get("text_output_tokens", 0) or 0),
     }
 
@@ -131,8 +144,12 @@ def build_doc() -> Document:
     stack = snapshot["stack"]
     sarvam_rates = snapshot["rates"]["sarvam"]
     openai_rates = snapshot["rates"]["openai"]
+    inr_per_usd = float(sarvam_rates["inr_per_usd"])
     baseline = load_observed_baseline()
     observed = baseline["costs"]
+    observed_chat_input_tokens = int(observed.get("chat_input_tokens", 0) or 0)
+    observed_chat_cached_input_tokens = int(observed.get("chat_cached_input_tokens", 0) or 0)
+    observed_chat_output_tokens = int(observed.get("chat_output_tokens", 0) or 0)
 
     duration_sec = max(int(baseline.get("duration_sec", 0) or 0), 1)
     observed_minutes = duration_sec / 60.0
@@ -176,6 +193,9 @@ def build_doc() -> Document:
         "Scope: Current stack only. This version restores the 4-minute and volume-planning sections, "
         "but all extrapolations are now based on an actually tracked dashboard baseline instead of the old synthetic benchmark."
     )
+    doc.add_paragraph(
+        f"FX normalization used for all USD↔INR equivalents in this document: ₹{inr_per_usd:.2f} per USD."
+    )
 
     doc.add_heading("0. Summary", level=2)
     doc.add_paragraph(
@@ -187,9 +207,9 @@ def build_doc() -> Document:
         ["Stack", "Observed call baseline", "Tracked cost / min", "Extrapolated cost / 4-min call", "Best-fit note"],
         [[
             f"{stack['tts_model']} + {stack['stt_model']} + {stack['chat_model']}",
-            f"{fmt_seconds(duration_sec)} @ {fmt_usd4(float(baseline['cost_usd']))}",
-            fmt_usd(cost_per_minute, 3),
-            fmt_usd(extrapolated_total, 3),
+            f"{fmt_seconds(duration_sec)} @ {fmt_usd_with_inr(float(baseline['cost_usd']), inr_per_usd, usd_digits=4)}",
+            fmt_usd_with_inr(cost_per_minute, inr_per_usd, usd_digits=3),
+            fmt_usd_with_inr(extrapolated_total, inr_per_usd, usd_digits=3),
             "Uses the app's tracked runtime cost as the source of truth, then scales it to the earlier 4-minute planning format.",
         ]],
     )
@@ -217,32 +237,56 @@ def build_doc() -> Document:
         ["Metric", "Observed value"],
         [
             ["Observed call duration", fmt_seconds(duration_sec)],
-            ["Observed dashboard-tracked total cost", fmt_usd4(float(baseline["cost_usd"]))],
+            ["Observed dashboard-tracked total cost", fmt_usd_with_inr(float(baseline["cost_usd"]), inr_per_usd, usd_digits=4)],
             ["Observed dashboard-tracked total units", fmt_int(int(baseline.get("total_units", 0) or 0))],
-            ["Derived tracked cost / minute", fmt_usd4(cost_per_minute)],
+            ["Derived tracked cost / minute", fmt_usd_with_inr(cost_per_minute, inr_per_usd, usd_digits=4)],
             ["Derived tracked units / minute", fmt_int(units_per_minute)],
             ["Observed Sarvam TTS chars", fmt_int(int(observed["sarvam_tts_chars"]))],
             ["Observed Sarvam STT seconds", fmt_int(int(observed["sarvam_stt_seconds"]))],
-            ["Observed OpenAI chat input tokens", fmt_int(int(observed["chat_input_tokens"]))],
-            ["Observed OpenAI chat output tokens", fmt_int(int(observed["chat_output_tokens"]))],
+            ["Observed OpenAI chat input tokens", fmt_int(observed_chat_input_tokens)],
+            ["Observed OpenAI chat cached input tokens", fmt_int(observed_chat_cached_input_tokens)],
+            ["Observed OpenAI chat output tokens", fmt_int(observed_chat_output_tokens)],
         ],
     )
 
     doc.add_heading("3. Provider Rates Used", level=2)
+    provider_rate_rows = [
+        [f"Sarvam {stack['tts_model']}", f"INR {sarvam_rates['tts_inr_per_10k_chars'][stack['tts_model']]:.0f}", "per 10,000 characters"],
+        [f"Sarvam {stack['stt_model']}", f"INR {sarvam_rates['stt_inr_per_hour'][stack['stt_model']]:.0f}", "per audio hour"],
+        [f"OpenAI {stack['chat_model']} input", fmt_usd_rate_with_inr(openai_rates[stack['chat_model']]['text_input_per_million'], inr_per_usd), "per 1M text input tokens"],
+        [f"OpenAI {stack['chat_model']} cached input", fmt_usd_rate_with_inr(openai_rates[stack['chat_model']]['text_cached_input_per_million'], inr_per_usd), "per 1M cached input tokens"],
+        [f"OpenAI {stack['chat_model']} output", fmt_usd_rate_with_inr(openai_rates[stack['chat_model']]['text_output_per_million'], inr_per_usd), "per 1M text output tokens"],
+    ]
+    if stack["supervisor_model"] == stack["language_coach_model"]:
+        shared_model = stack["supervisor_model"]
+        provider_rate_rows.extend(
+            [
+                [f"OpenAI {shared_model} input (supervisor / language coach)", fmt_usd_rate_with_inr(openai_rates[shared_model]['text_input_per_million'], inr_per_usd), "per 1M text input tokens"],
+                [f"OpenAI {shared_model} cached input (supervisor / language coach)", fmt_usd_rate_with_inr(openai_rates[shared_model]['text_cached_input_per_million'], inr_per_usd), "per 1M cached input tokens"],
+                [f"OpenAI {shared_model} output (supervisor / language coach)", fmt_usd_rate_with_inr(openai_rates[shared_model]['text_output_per_million'], inr_per_usd), "per 1M text output tokens"],
+            ]
+        )
+    else:
+        provider_rate_rows.extend(
+            [
+                [f"OpenAI {stack['supervisor_model']} input", fmt_usd_rate_with_inr(openai_rates[stack['supervisor_model']]['text_input_per_million'], inr_per_usd), "per 1M text input tokens"],
+                [f"OpenAI {stack['supervisor_model']} cached input", fmt_usd_rate_with_inr(openai_rates[stack['supervisor_model']]['text_cached_input_per_million'], inr_per_usd), "per 1M cached input tokens"],
+                [f"OpenAI {stack['supervisor_model']} output", fmt_usd_rate_with_inr(openai_rates[stack['supervisor_model']]['text_output_per_million'], inr_per_usd), "per 1M text output tokens"],
+                [f"OpenAI {stack['language_coach_model']} input", fmt_usd_rate_with_inr(openai_rates[stack['language_coach_model']]['text_input_per_million'], inr_per_usd), "per 1M text input tokens"],
+                [f"OpenAI {stack['language_coach_model']} cached input", fmt_usd_rate_with_inr(openai_rates[stack['language_coach_model']]['text_cached_input_per_million'], inr_per_usd), "per 1M cached input tokens"],
+                [f"OpenAI {stack['language_coach_model']} output", fmt_usd_rate_with_inr(openai_rates[stack['language_coach_model']]['text_output_per_million'], inr_per_usd), "per 1M text output tokens"],
+            ]
+        )
     add_table(
         doc,
         ["Service", "Published rate", "Billing unit"],
-        [
-            [f"Sarvam {stack['tts_model']}", f"INR {sarvam_rates['tts_inr_per_10k_chars'][stack['tts_model']]:.0f}", "per 10,000 characters"],
-            [f"Sarvam {stack['stt_model']}", f"INR {sarvam_rates['stt_inr_per_hour'][stack['stt_model']]:.0f}", "per audio hour"],
-            [f"OpenAI {stack['chat_model']} input", f"${openai_rates[stack['chat_model']]['text_input_per_million']:.2f}", "per 1M text input tokens"],
-            [f"OpenAI {stack['chat_model']} output", f"${openai_rates[stack['chat_model']]['text_output_per_million']:.2f}", "per 1M text output tokens"],
-            [f"OpenAI {stack['supervisor_model']} input", f"${openai_rates[stack['supervisor_model']]['text_input_per_million']:.2f}", "per 1M text input tokens"],
-            [f"OpenAI {stack['supervisor_model']} output", f"${openai_rates[stack['supervisor_model']]['text_output_per_million']:.2f}", "per 1M text output tokens"],
-        ],
+        provider_rate_rows,
     )
     doc.add_paragraph(
         f"Internal normalization rate: INR {sarvam_rates['inr_per_usd']:.2f} per USD. Price table version: {snapshot['price_table_version']}."
+    )
+    doc.add_paragraph(
+        f"Official provider pricing is Sarvam in INR and OpenAI in USD. Every INR figure shown next to a USD figure in this document uses the same internal normalization rate: ₹{inr_per_usd:.2f} per USD."
     )
 
     doc.add_heading("4. Detailed Cost Build-Up", level=2)
@@ -251,12 +295,12 @@ def build_doc() -> Document:
         doc,
         ["Line item", "Measured basis", "Cost"],
         [
-            [f"Sarvam {stack['tts_model']} TTS", f"{fmt_int(int(observed['sarvam_tts_chars']))} chars tracked by dashboard", fmt_usd4(float(observed["sarvam_tts_cost_usd"]))],
-            [f"Sarvam {stack['stt_model']} STT", f"{fmt_int(int(observed['sarvam_stt_seconds']))} seconds tracked by dashboard", fmt_usd4(float(observed["sarvam_stt_cost_usd"]))],
-            [f"OpenAI {stack['chat_model']} chat / policy", f"{fmt_int(int(observed['chat_input_tokens']))} input + {fmt_int(int(observed['chat_output_tokens']))} output tokens tracked", fmt_usd4(float(observed["chat_cost_usd"]))],
-            ["Supervisor", "Measured dashboard cost", fmt_usd4(float(observed["supervisor_cost_usd"]))],
-            ["Language coach", "Measured dashboard cost", fmt_usd4(float(observed["language_coach_cost_usd"]))],
-            ["Total / observed call", "", fmt_usd4(float(baseline["cost_usd"]))],
+            [f"Sarvam {stack['tts_model']} TTS", f"{fmt_int(int(observed['sarvam_tts_chars']))} chars tracked by dashboard", fmt_usd_with_inr(float(observed["sarvam_tts_cost_usd"]), inr_per_usd, usd_digits=4)],
+            [f"Sarvam {stack['stt_model']} STT", f"{fmt_int(int(observed['sarvam_stt_seconds']))} seconds tracked by dashboard", fmt_usd_with_inr(float(observed["sarvam_stt_cost_usd"]), inr_per_usd, usd_digits=4)],
+            [f"OpenAI {stack['chat_model']} chat / policy", f"{fmt_int(observed_chat_input_tokens)} input + {fmt_int(observed_chat_cached_input_tokens)} cached input + {fmt_int(observed_chat_output_tokens)} output tokens tracked", fmt_usd_with_inr(float(observed["chat_cost_usd"]), inr_per_usd, usd_digits=4)],
+            ["Supervisor", "Measured dashboard cost", fmt_usd_with_inr(float(observed["supervisor_cost_usd"]), inr_per_usd, usd_digits=4)],
+            ["Language coach", "Measured dashboard cost", fmt_usd_with_inr(float(observed["language_coach_cost_usd"]), inr_per_usd, usd_digits=4)],
+            ["Total / observed call", "", fmt_usd_with_inr(float(baseline["cost_usd"]), inr_per_usd, usd_digits=4)],
         ],
     )
     doc.add_paragraph(f"Extrapolated {int(EXTRAPOLATED_CALL_MINUTES)}-minute equivalent using the tracked per-minute baseline")
@@ -264,12 +308,12 @@ def build_doc() -> Document:
         doc,
         ["Line item", "Extrapolation", "Cost"],
         [
-            [f"Sarvam {stack['tts_model']} TTS", f"Observed TTS cost x {extrapolation_factor:.4f}", fmt_usd4(extrapolated_tts)],
-            [f"Sarvam {stack['stt_model']} STT", f"Observed STT cost x {extrapolation_factor:.4f}", fmt_usd4(extrapolated_stt)],
-            [f"OpenAI {stack['chat_model']} chat / policy", f"Observed chat cost x {extrapolation_factor:.4f}", fmt_usd4(extrapolated_chat)],
-            ["Supervisor", f"Observed supervisor cost x {extrapolation_factor:.4f}", fmt_usd4(extrapolated_supervisor)],
-            ["Language coach", f"Observed coach cost x {extrapolation_factor:.4f}", fmt_usd4(extrapolated_coach)],
-            [f"Total / {int(EXTRAPOLATED_CALL_MINUTES)}-min call", "", fmt_usd4(extrapolated_total)],
+            [f"Sarvam {stack['tts_model']} TTS", f"Observed TTS cost x {extrapolation_factor:.4f}", fmt_usd_with_inr(extrapolated_tts, inr_per_usd, usd_digits=4)],
+            [f"Sarvam {stack['stt_model']} STT", f"Observed STT cost x {extrapolation_factor:.4f}", fmt_usd_with_inr(extrapolated_stt, inr_per_usd, usd_digits=4)],
+            [f"OpenAI {stack['chat_model']} chat / policy", f"Observed chat cost x {extrapolation_factor:.4f}", fmt_usd_with_inr(extrapolated_chat, inr_per_usd, usd_digits=4)],
+            ["Supervisor", f"Observed supervisor cost x {extrapolation_factor:.4f}", fmt_usd_with_inr(extrapolated_supervisor, inr_per_usd, usd_digits=4)],
+            ["Language coach", f"Observed coach cost x {extrapolation_factor:.4f}", fmt_usd_with_inr(extrapolated_coach, inr_per_usd, usd_digits=4)],
+            [f"Total / {int(EXTRAPOLATED_CALL_MINUTES)}-min call", "", fmt_usd_with_inr(extrapolated_total, inr_per_usd, usd_digits=4)],
         ],
     )
 
@@ -292,9 +336,9 @@ def build_doc() -> Document:
         doc,
         ["Scenario", "Assumed call length", "Estimated cost / call"],
         [
-            ["-50% vs 4-min baseline", "2 minutes", fmt_usd(two_min_cost, 3)],
-            ["Baseline", "4 minutes", fmt_usd(extrapolated_total, 3)],
-            ["+50% vs 4-min baseline", "6 minutes", fmt_usd(six_min_cost, 3)],
+            ["-50% vs 4-min baseline", "2 minutes", fmt_usd_with_inr(two_min_cost, inr_per_usd, usd_digits=3)],
+            ["Baseline", "4 minutes", fmt_usd_with_inr(extrapolated_total, inr_per_usd, usd_digits=3)],
+            ["+50% vs 4-min baseline", "6 minutes", fmt_usd_with_inr(six_min_cost, inr_per_usd, usd_digits=3)],
         ],
     )
 
@@ -307,10 +351,10 @@ def build_doc() -> Document:
         doc,
         ["Metric", "Value"],
         [
-            [f"Extrapolated cost per {int(EXTRAPOLATED_CALL_MINUTES)}-min call", fmt_usd(extrapolated_total, 3)],
-            ["Daily runtime cost", fmt_usd(daily_cost, 2)],
-            ["Monthly runtime cost", fmt_usd(monthly_cost, 2)],
-            ["Annual runtime cost", fmt_usd(annual_cost, 2)],
+            [f"Extrapolated cost per {int(EXTRAPOLATED_CALL_MINUTES)}-min call", fmt_usd_with_inr(extrapolated_total, inr_per_usd, usd_digits=3)],
+            ["Daily runtime cost", fmt_usd_with_inr(daily_cost, inr_per_usd, usd_digits=2)],
+            ["Monthly runtime cost", fmt_usd_with_inr(monthly_cost, inr_per_usd, usd_digits=2)],
+            ["Annual runtime cost", fmt_usd_with_inr(annual_cost, inr_per_usd, usd_digits=2)],
         ],
     )
 
@@ -318,12 +362,17 @@ def build_doc() -> Document:
     doc.add_paragraph(
         "The dashboard ledger is the source of truth for actual call economics. This document keeps the old planning format, but the 4-minute and volume sections are now extrapolated from a measured baseline instead of a synthetic benchmark."
     )
+    doc.add_paragraph(
+        "Pricing audit date: June 2, 2026. OpenAI rates were cross-checked against the official OpenAI API pricing and model pages. Sarvam rates were cross-checked against the official Sarvam pricing docs."
+    )
     if int(observed["sarvam_stt_seconds"]) == 0:
         doc.add_paragraph(
             "The current observed baseline still shows zero tracked STT seconds. That baseline was captured before a fresh post-fix call exercised the repaired STT session metering path. The next completed call log will replace this fallback baseline automatically."
         )
     doc.add_paragraph("Sarvam API pricing: https://www.sarvam.ai/api-pricing")
     doc.add_paragraph("OpenAI pricing: https://developers.openai.com/api/docs/pricing")
+    doc.add_paragraph("OpenAI GPT-4.1 model page: https://developers.openai.com/api/docs/models/gpt-4.1")
+    doc.add_paragraph("OpenAI GPT-4.1 mini model page: https://developers.openai.com/api/docs/models/gpt-4.1-mini")
     doc.add_paragraph("Repo reference: backend/app.py pricing snapshot + backend/data/call_log.jsonl + backend/data/pricing_baseline.json")
 
     return doc

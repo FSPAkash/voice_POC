@@ -14,6 +14,7 @@
     "sarvam_tts_chars": 2368,
     "sarvam_stt_seconds": 123,
     "chat_input_tokens": 29926,
+    "chat_cached_input_tokens": 16640,
     "chat_output_tokens": 849
   }
 }

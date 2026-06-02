@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 
 from backend import app as policy_app
@@ -83,6 +84,37 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(config["sarvam_voice_preset"]["id"], f"{policy_app.DEFAULT_REALTIME_VOICE}-collections")
         self.assertEqual(config["pricing_reference"]["sarvam"]["currency"], "INR")
         self.assertEqual(config["pricing_reference"]["openai_currency"], "USD")
+        self.assertEqual(config["telephony"]["provider"], "exotel")
+        self.assertEqual(config["telephony"]["stream_sample_rate"], policy_app.EXOTEL_STREAM_SAMPLE_RATE)
+
+    def test_build_exotel_stream_url_uses_render_public_url(self) -> None:
+        original = os.environ.get("RENDER_EXTERNAL_URL")
+        try:
+            os.environ["RENDER_EXTERNAL_URL"] = "https://dhl-poc.onrender.com"
+            url = policy_app.build_exotel_stream_url("cost_session_phone_123")
+        finally:
+            if original is None:
+                os.environ.pop("RENDER_EXTERNAL_URL", None)
+            else:
+                os.environ["RENDER_EXTERNAL_URL"] = original
+
+        self.assertEqual(
+            url,
+            f"wss://dhl-poc.onrender.com{policy_app.EXOTEL_STREAM_PATH}?session_id=cost_session_phone_123&sample-rate={policy_app.EXOTEL_STREAM_SAMPLE_RATE}",
+        )
+
+    def test_build_exotel_connect_payload_targets_bidirectional_stream(self) -> None:
+        payload = policy_app.build_exotel_connect_payload(
+            to_number="+91 9136152622",
+            caller_id="022-461-82014",
+            stream_url="wss://dhl-poc.onrender.com/api/exotel/media?session_id=abc",
+            status_callback_url="https://dhl-poc.onrender.com/api/exotel/status",
+        )
+
+        self.assertEqual(payload["From"], "+919136152622")
+        self.assertEqual(payload["CallerId"], "02246182014")
+        self.assertEqual(payload["StreamType"], "bidirectional")
+        self.assertEqual(payload["StatusCallbackEvents[0]"], "terminal")
 
     def test_create_session_reuses_requested_cost_session_id(self) -> None:
         client = policy_app.app.test_client()

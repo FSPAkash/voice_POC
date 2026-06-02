@@ -5,12 +5,14 @@ import math
 import os
 import re
 import uuid
+from collections import deque
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import base64
 import threading
@@ -131,6 +133,14 @@ SARVAM_TTS_DICT_ID = (os.environ.get("SARVAM_TTS_DICT_ID", "") or "").strip()
 SARVAM_STT_MODE = (os.environ.get("SARVAM_STT_MODE", "codemix") or "codemix").strip().lower()
 if SARVAM_STT_MODE not in {"transcribe", "translate", "verbatim", "translit", "codemix"}:
     SARVAM_STT_MODE = "codemix"
+
+EXOTEL_ACCOUNT_SID = (os.environ.get("EXOTEL_ACCOUNT_SID", "") or "").strip()
+EXOTEL_API_KEY = (os.environ.get("EXOTEL_API_KEY", "") or "").strip()
+EXOTEL_API_TOKEN = (os.environ.get("EXOTEL_API_TOKEN", "") or "").strip()
+EXOTEL_API_BASE_URL = (os.environ.get("EXOTEL_API_BASE_URL", "https://api.in.exotel.com") or "https://api.in.exotel.com").rstrip("/")
+EXOTEL_CALLER_ID = (os.environ.get("EXOTEL_CALLER_ID", "") or "").strip()
+EXOTEL_STREAM_SAMPLE_RATE = _env_int("EXOTEL_STREAM_SAMPLE_RATE", 16000, minimum=8000, maximum=24000)
+EXOTEL_STREAM_PATH = (os.environ.get("EXOTEL_STREAM_PATH", "/api/exotel/media") or "/api/exotel/media").strip() or "/api/exotel/media"
 
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
@@ -257,6 +267,163 @@ def sarvam_tts_options(language_code: str, voice: str) -> dict[str, Any]:
     if SARVAM_TTS_DICT_ID:
         options["dict_id"] = SARVAM_TTS_DICT_ID
     return options
+
+
+SARVAM_LANGUAGE_IDS_BY_CODE = {
+    code: language_id
+    for language_id, code in SARVAM_LANGUAGE_CODES.items()
+    if language_id not in {"hinglish", "hindi"} or code not in {"hi-IN"}
+}
+SARVAM_LANGUAGE_IDS_BY_CODE.setdefault("bn-IN", "bengali")
+SARVAM_LANGUAGE_IDS_BY_CODE.setdefault("mr-IN", "marathi")
+SARVAM_LANGUAGE_IDS_BY_CODE.setdefault("ta-IN", "tamil")
+
+
+def default_language_advice(language_id: str | None = None) -> dict[str, Any]:
+    normalized = supported_render_language_id(language_id or DEFAULT_LANGUAGE_ID)
+    return {
+        "detected_language_id": normalized,
+        "suggested_language_id": normalized,
+        "transcription_language_id": normalized,
+        "transcript_quality": "good",
+        "confidence": "high",
+        "should_switch": False,
+        "nudge": "Open in Hinglish and switch only when the customer clearly prefers another language.",
+        "rationale": "Default call opening behavior.",
+    }
+
+
+def determine_disposition(tool_name: str) -> str | None:
+    return {
+        "log_promise_to_pay": "Promise to pay logged",
+        "log_already_paid": "Already paid claimed",
+        "resend_invoice": "Invoice resend requested",
+        "log_dispute": "Dispute raised",
+        "update_contact": "Alternate contact captured",
+        "transfer_to_human": "Transferred to human",
+    }.get(str(tool_name or "").strip())
+
+
+def sanitize_phone_number(value: str, *, keep_plus: bool = True) -> str:
+    stripped = re.sub(r"[^\d+]", "", str(value or "").strip())
+    if keep_plus and stripped.startswith("+"):
+        return f"+{re.sub(r'\\D', '', stripped[1:])}"
+    return re.sub(r"\D", "", stripped)
+
+
+def public_base_url() -> str:
+    configured = (os.environ.get("RENDER_EXTERNAL_URL", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    return ""
+
+
+def public_websocket_base_url() -> str:
+    base_url = public_base_url()
+    if not base_url:
+        return ""
+    if base_url.startswith("https://"):
+        return f"wss://{base_url[len('https://'):]}"
+    if base_url.startswith("http://"):
+        return f"ws://{base_url[len('http://'):]}"
+    return base_url
+
+
+def exotel_enabled() -> bool:
+    return bool(
+        EXOTEL_ACCOUNT_SID
+        and EXOTEL_API_KEY
+        and EXOTEL_API_TOKEN
+        and EXOTEL_CALLER_ID
+        and public_websocket_base_url()
+    )
+
+
+def build_exotel_stream_url(session_id: str) -> str:
+    base = public_websocket_base_url().rstrip("/")
+    if not base:
+        raise RuntimeError("RENDER_EXTERNAL_URL must be set for Exotel streaming.")
+    params = urlencode({
+        "session_id": session_id,
+        "sample-rate": EXOTEL_STREAM_SAMPLE_RATE,
+    })
+    return f"{base}{EXOTEL_STREAM_PATH}?{params}"
+
+
+def build_exotel_status_callback_url() -> str:
+    base = public_base_url().rstrip("/")
+    if not base:
+        raise RuntimeError("RENDER_EXTERNAL_URL must be set for Exotel callbacks.")
+    return f"{base}/api/exotel/status"
+
+
+def build_exotel_connect_payload(
+    *,
+    to_number: str,
+    caller_id: str,
+    stream_url: str,
+    status_callback_url: str,
+) -> dict[str, str]:
+    return {
+        "From": sanitize_phone_number(to_number, keep_plus=True),
+        "CallerId": sanitize_phone_number(caller_id, keep_plus=False),
+        "StatusCallback": status_callback_url,
+        "StatusCallbackMethod": "POST",
+        "StatusCallbackEvents[0]": "terminal",
+        "StreamUrl": stream_url,
+        "StreamType": "bidirectional",
+        "StreamTimeout": "86400",
+    }
+
+
+def language_id_for_sarvam_code(language_code: str) -> str | None:
+    normalized = str(language_code or "").strip()
+    if not normalized:
+        return None
+    if normalized == "bn-IN":
+        return "bengali"
+    if normalized == "mr-IN":
+        return "marathi"
+    if normalized == "ta-IN":
+        return "tamil"
+    return SARVAM_LANGUAGE_IDS_BY_CODE.get(normalized)
+
+
+def build_opening_text(
+    customer: dict[str, Any],
+    persona: dict[str, Any] | None,
+    opening_language_label: str = "Hinglish",
+) -> str:
+    contact = customer.get("contact_name") or "the accounts payable contact"
+    agent_name = (persona or {}).get("name") or "the DHL collections specialist"
+    lower_label = str(opening_language_label or "Hinglish").strip().lower()
+    kolkata_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    hour = kolkata_now.hour
+    greeting = "Good morning" if hour < 12 else "Good afternoon" if hour < 17 else "Good evening"
+    is_female = (persona or {}).get("gender") == "female"
+    if lower_label == "hinglish":
+        return (
+            f"{greeting}, मैं {agent_name} DHL Express India से बोल {'रही' if is_female else 'रहा'} हूँ। "
+            f"क्या मैं {contact} से बात कर {'रही' if is_female else 'रहा'} हूँ?"
+        )
+    if lower_label == "hindi":
+        return (
+            f"नमस्कार, मैं {agent_name} DHL Express India से बोल {'रही' if is_female else 'रहा'} हूँ। "
+            f"क्या मैं {contact} से बात कर {'रही' if is_female else 'रहा'} हूँ?"
+        )
+    if lower_label == "marathi":
+        return (
+            f"नमस्कार, मी {agent_name}, DHL Express India मधून बोलत आहे. "
+            f"{contact} यांच्यासोबत मी बोलत आहे का?"
+        )
+    if lower_label == "tamil":
+        return (
+            f"வணக்கம், நான் {agent_name}, DHL Express India-லிருந்து பேசுகிறேன். "
+            f"{contact} உடன் பேசுகிறேனா?"
+        )
+    if lower_label == "bengali":
+        return f"{greeting}, ami {agent_name}, DHL Express India theke bolchi. Ami ki {contact}-er sathe kotha bolchi?"
+    return f"{greeting}, this is {agent_name} from DHL Express India. Am I speaking with {contact}?"
 DEFAULT_ACCOUNT_ID = os.environ.get("DEMO_ACCOUNT_ID", "DHL001")
 
 OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -284,9 +451,9 @@ HUMAN_AGENT = {
 # bills TTS per character and STT per second, so we use synthetic "per million"
 # rates so the existing ledger math stays uniform.
 # Sarvam publishes INR rates, so we convert them using a configurable INR/USD
-# reference rate. Default uses a recent market quote suitable for rough cost
-# estimation, not settlement accounting.
-PRICE_TABLE_VERSION = "openai+sarvam-pricing-2026-05-29"
+# reference rate. The INR figures are the official provider prices; the USD
+# conversions are internal normalized estimates rather than settlement values.
+PRICE_TABLE_VERSION = "openai+sarvam-pricing-2026-06-02"
 SARVAM_INR_PER_USD = _env_float("SARVAM_INR_PER_USD", 96.13, minimum=1.0)
 SARVAM_BULBUL_V3_INR_PER_10K_CHARS = _env_float("SARVAM_BULBUL_V3_INR_PER_10K_CHARS", 30.0, minimum=0.0)
 SARVAM_BULBUL_V2_INR_PER_10K_CHARS = _env_float("SARVAM_BULBUL_V2_INR_PER_10K_CHARS", 15.0, minimum=0.0)
@@ -325,6 +492,8 @@ DEFAULT_PRICE_TABLE = {
     },
     # Legacy OpenAI realtime / transcription entries retained for historical
     # call logs, tests, and any stale client payloads that still report them.
+    # Mirrors the current official gpt-realtime-1.5 standard pricing. We keep
+    # the generic key for historical logs that still emit `gpt-realtime`.
     "gpt-realtime": {
         "text_input_per_million": 4.0,
         "text_cached_input_per_million": 0.4,
@@ -3933,6 +4102,12 @@ def bootstrap():
                 "sample_rate": SARVAM_TTS_SAMPLE_RATE,
                 "codec": SARVAM_TTS_OUTPUT_CODEC,
             },
+            "telephony": {
+                "provider": "exotel",
+                "enabled": exotel_enabled(),
+                "caller_id": sanitize_phone_number(EXOTEL_CALLER_ID, keep_plus=False) if EXOTEL_CALLER_ID else "",
+                "stream_sample_rate": EXOTEL_STREAM_SAMPLE_RATE,
+            },
         },
     }
     return success_json(payload)
@@ -3991,7 +4166,114 @@ def create_session():
     )
 
 
-def _sarvam_tts_rest(text: str, voice: str, language_code: str) -> bytes:
+@app.get("/api/exotel/calls/active")
+def exotel_active_call():
+    active_snapshot = None
+    recent_snapshot = None
+    with PHONE_CALL_SESSIONS_LOCK:
+        for session in PHONE_CALL_SESSIONS.values():
+            snapshot = session.snapshot()
+            recent_snapshot = snapshot
+            if snapshot["active"]:
+                active_snapshot = snapshot
+                break
+    return success_json({"active_call": active_snapshot, "last_call": recent_snapshot})
+
+
+@app.post("/api/exotel/calls/start")
+def exotel_start_call():
+    if not exotel_enabled():
+        return error_json(
+            "Exotel is not fully configured. Set EXOTEL_ACCOUNT_SID, EXOTEL_API_KEY, EXOTEL_API_TOKEN, EXOTEL_CALLER_ID, and RENDER_EXTERNAL_URL.",
+            500,
+        )
+    if has_active_phone_call_session():
+        return error_json("A phone demo call is already active. End that call before starting another.", 409)
+
+    body = request.get_json(silent=True) or {}
+    account_number = str(body.get("account_number") or DEFAULT_ACCOUNT_ID).strip() or DEFAULT_ACCOUNT_ID
+    language_id = supported_render_language_id(str(body.get("language_id") or DEFAULT_LANGUAGE_ID))
+    requested_voice = str(body.get("voice") or DEFAULT_REALTIME_VOICE).strip().lower()
+    voice = requested_voice if requested_voice in VOICE_PERSONAS else DEFAULT_REALTIME_VOICE
+    target_number = sanitize_phone_number(
+        str(body.get("to_number") or body.get("target_number") or "").strip(),
+        keep_plus=True,
+    )
+    caller_id = str(body.get("caller_id") or EXOTEL_CALLER_ID).strip()
+    if not target_number:
+        return error_json("to_number is required.")
+    if not get_customer(account_number):
+        return error_json(f"Customer fixture {account_number} not found.", 404)
+
+    ledger = default_ledger(realtime_model=SARVAM_TTS_MODEL, transcription_model=SARVAM_STT_MODEL)
+    write_json(LEDGER_FILE, ledger)
+    session_id = ledger["session_id"]
+    session = PhoneCallSession(
+        session_id=session_id,
+        account_number=account_number,
+        target_number=target_number,
+        caller_id=caller_id,
+        language_id=language_id,
+        voice=voice,
+    )
+    with PHONE_CALL_SESSIONS_LOCK:
+        PHONE_CALL_SESSIONS[session_id] = session
+
+    try:
+        stream_url = build_exotel_stream_url(session_id)
+        status_callback_url = build_exotel_status_callback_url()
+        outbound_payload = build_exotel_connect_payload(
+            to_number=target_number,
+            caller_id=caller_id,
+            stream_url=stream_url,
+            status_callback_url=status_callback_url,
+        )
+        response = requests.post(
+            f"{EXOTEL_API_BASE_URL}/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect",
+            auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
+            data=outbound_payload,
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001
+        with PHONE_CALL_SESSIONS_LOCK:
+            PHONE_CALL_SESSIONS.pop(session_id, None)
+        return error_json(f"Exotel call start failed: {str(exc)[:300]}", 502)
+
+    if not response.ok:
+        with PHONE_CALL_SESSIONS_LOCK:
+            PHONE_CALL_SESSIONS.pop(session_id, None)
+        return error_json(
+            f"Exotel call start failed {response.status_code}: {response.text[:400]}",
+            502,
+        )
+
+    try:
+        exotel_payload = response.json()
+    except ValueError:
+        exotel_payload = {"raw_response": response.text[:400]}
+    call_info = exotel_payload.get("Call") if isinstance(exotel_payload, dict) else None
+    if not isinstance(call_info, dict):
+        call_info = exotel_payload if isinstance(exotel_payload, dict) else {}
+    call_sid = str(call_info.get("Sid") or call_info.get("sid") or call_info.get("CallSid") or "").strip()
+    session.register_call_sid(call_sid)
+    session.log_event("dial_requested", {"call_sid": call_sid, "exotel_response": exotel_payload})
+    return success_json({"ok": True, "session": session.snapshot(), "exotel": exotel_payload}, 202)
+
+
+@app.post("/api/exotel/status")
+def exotel_status():
+    payload = request.get_json(silent=True) or request.form.to_dict(flat=True) or {}
+    call_sid = str(payload.get("CallSid") or payload.get("Sid") or "").strip()
+    session_id = str(payload.get("session_id") or "").strip()
+    session = get_phone_call_session(session_id=session_id or None, call_sid=call_sid or None)
+    if session:
+        if call_sid:
+            session.register_call_sid(call_sid)
+        session.update_status(payload)
+    return success_json({"ok": True})
+
+
+def _sarvam_tts_rest(text: str, voice: str, language_code: str, *, sample_rate: int | None = None) -> bytes:
     """Synchronous REST fallback: returns encoded audio bytes from Bulbul v3.
     Used when streaming WS proxy is unavailable or for short utterances.
     """
@@ -4005,7 +4287,10 @@ def _sarvam_tts_rest(text: str, voice: str, language_code: str) -> bytes:
         },
         json={
             "inputs": [text],
-            **sarvam_tts_options(language_code, voice),
+            **{
+                **sarvam_tts_options(language_code, voice),
+                "speech_sample_rate": int(sample_rate or SARVAM_TTS_SAMPLE_RATE),
+            },
             "output_audio_codec": SARVAM_TTS_OUTPUT_CODEC,
         },
         timeout=30,
@@ -4018,6 +4303,79 @@ def _sarvam_tts_rest(text: str, voice: str, language_code: str) -> bytes:
         raise RuntimeError("Sarvam TTS REST returned no audio")
     # API returns base64 WAV (with header) per utterance.
     return base64.b64decode(audios[0])
+
+
+@sock.route(EXOTEL_STREAM_PATH)
+def exotel_media(ws):
+    if not WEBSOCKET_CLIENT_AVAILABLE:
+        ws.send(json.dumps({"event": "error", "message": "websocket-client not installed"}))
+        return
+    session_id = str(request.args.get("session_id") or "").strip()
+    session = get_phone_call_session(session_id=session_id or None)
+    if not session:
+        ws.send(json.dumps({"event": "error", "message": "Unknown or expired phone session"}))
+        return
+    session.attach_transport(ws)
+    session.log_event("websocket_connected", {"session_id": session_id})
+    disconnected_reason = "stream_disconnected"
+    try:
+        while True:
+            raw = ws.receive(timeout=120)
+            if raw is None:
+                break
+            if isinstance(raw, (bytes, bytearray)):
+                continue
+            try:
+                payload = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            event_type = str(payload.get("event") or "").strip().lower()
+            if event_type == "connected":
+                session.log_event("connected", payload)
+                continue
+            if event_type == "start":
+                start_payload = payload.get("start") if isinstance(payload.get("start"), dict) else {}
+                stream_sid = str(
+                    start_payload.get("stream_sid")
+                    or start_payload.get("streamSid")
+                    or payload.get("stream_sid")
+                    or payload.get("streamSid")
+                    or ""
+                ).strip()
+                call_sid = str(
+                    start_payload.get("call_sid")
+                    or start_payload.get("callSid")
+                    or start_payload.get("call_id")
+                    or payload.get("call_sid")
+                    or ""
+                ).strip()
+                if call_sid:
+                    session.register_call_sid(call_sid)
+                session.start_stream(stream_sid)
+                continue
+            if event_type == "media":
+                media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+                b64 = str(media.get("payload") or "").strip()
+                if not b64:
+                    continue
+                try:
+                    session.forward_audio(base64.b64decode(b64))
+                except Exception:
+                    continue
+                continue
+            if event_type == "mark":
+                mark_payload = payload.get("mark") if isinstance(payload.get("mark"), dict) else {}
+                session.handle_mark(str(mark_payload.get("name") or "").strip())
+                continue
+            if event_type == "stop":
+                disconnected_reason = "completed"
+                session.finish("completed")
+                break
+            if event_type == "dtmf":
+                session.log_event("dtmf", payload)
+                continue
+    finally:
+        session.finish(disconnected_reason)
 
 
 @sock.route("/api/tts/stream")
@@ -4512,6 +4870,16 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     return header + pcm
 
 
+def _wav_to_pcm(wav_bytes: bytes) -> tuple[bytes, int]:
+    import io
+    import wave
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
+        sample_rate = handle.getframerate()
+        pcm = handle.readframes(handle.getnframes())
+    return pcm, sample_rate
+
+
 def _sarvam_stt_rest(pcm: bytes, sample_rate: int, language_code: str) -> tuple[str, str]:
     """Returns (transcript, detected_language_code). Uses Saarika auto-detect
     so the customer can switch languages mid-call without us forcing hi-IN."""
@@ -4537,6 +4905,684 @@ def _sarvam_stt_rest(pcm: bytes, sample_rate: int, language_code: str) -> tuple[
     transcript = str(payload.get("transcript") or "").strip()
     detected = str(payload.get("language_code") or language_code or "hi-IN").strip()
     return transcript, detected
+
+
+PHONE_CALL_SESSIONS: dict[str, "PhoneCallSession"] = {}
+PHONE_CALL_SESSIONS_BY_CALL_SID: dict[str, str] = {}
+PHONE_CALL_SESSIONS_LOCK = threading.RLock()
+
+
+class PhoneCallSession:
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        account_number: str,
+        target_number: str,
+        caller_id: str,
+        language_id: str,
+        voice: str,
+    ) -> None:
+        self.session_id = session_id
+        self.account_number = account_number
+        self.target_number = sanitize_phone_number(target_number, keep_plus=True)
+        self.caller_id = sanitize_phone_number(caller_id, keep_plus=False)
+        self.language_id = supported_render_language_id(language_id)
+        self.active_language_id = self.language_id
+        self.voice = voice if voice.lower() in VOICE_PERSONAS else DEFAULT_REALTIME_VOICE
+        self.customer = get_customer(account_number) or {}
+        self.invoices = get_invoices(account_number)
+        self.persona = persona_for_voice(self.voice)
+        self.agent_prompt = compose_agent_instructions(account_number, self.voice)
+        self.language_advice = default_language_advice(self.language_id)
+        self.transcript: list[dict[str, Any]] = []
+        self.tool_calls: list[dict[str, Any]] = []
+        self.coaching_hints: list[str] = []
+        self.disposition = "Call in progress"
+        self.turn_number = 0
+        self.summary: dict[str, Any] | None = None
+        self.status = "queued"
+        self.call_sid: str | None = None
+        self.stream_sid: str | None = None
+        self.created_at = utc_now()
+        self.started_at: datetime | None = None
+        self.ended_at: datetime | None = None
+        self._lock = threading.RLock()
+        self._ws: Any | None = None
+        self._stop = False
+        self._turn_commit_timer: threading.Timer | None = None
+        self._turn_commit_buffer: list[str] = []
+        self._current_response_id: str | None = None
+        self._current_mark_name: str | None = None
+        self._current_tts_serial = 0
+        self._last_agent_speak_start_at: float | None = None
+        self._pending_barge_in_at: float | None = None
+        self._stt_upstream: Any | None = None
+        self._stt_thread: threading.Thread | None = None
+        self._stt_audio_seconds_unbilled = 0.0
+        self._event_log: deque[dict[str, Any]] = deque(maxlen=40)
+        self._finalized = False
+        self._greeting_started = False
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            active = self.status in {"queued", "dialing", "connected"}
+            return {
+                "session_id": self.session_id,
+                "account_number": self.account_number,
+                "target_number": self.target_number,
+                "caller_id": self.caller_id,
+                "call_sid": self.call_sid,
+                "stream_sid": self.stream_sid,
+                "status": self.status,
+                "active": active,
+                "language_id": self.language_id,
+                "active_language_id": self.active_language_id,
+                "voice": self.voice,
+                "resolved_tts_voice": localized_sarvam_voice(self.voice, sarvam_language_code(self.active_language_id)),
+                "disposition": self.disposition,
+                "turn_number": self.turn_number,
+                "transcript_count": len(self.transcript),
+                "tool_call_count": len(self.tool_calls),
+                "summary": self.summary,
+                "created_at": self.created_at.isoformat(),
+                "started_at": self.started_at.isoformat() if self.started_at else None,
+                "ended_at": self.ended_at.isoformat() if self.ended_at else None,
+                "events": list(self._event_log),
+            }
+
+    def register_call_sid(self, call_sid: str | None) -> None:
+        normalized = str(call_sid or "").strip()
+        if not normalized:
+            return
+        with self._lock:
+            self.call_sid = normalized
+            if self.status == "queued":
+                self.status = "dialing"
+        with PHONE_CALL_SESSIONS_LOCK:
+            PHONE_CALL_SESSIONS_BY_CALL_SID[normalized] = self.session_id
+
+    def attach_transport(self, ws: Any) -> None:
+        with self._lock:
+            self._ws = ws
+
+    def log_event(self, kind: str, payload: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            self._event_log.append(
+                {
+                    "kind": kind,
+                    "at": utc_now_iso(),
+                    "payload": payload or {},
+                }
+            )
+
+    def _send_json(self, payload: dict[str, Any]) -> None:
+        with self._lock:
+            ws = self._ws
+        if ws is None:
+            return
+        ws.send(json.dumps(payload))
+
+    def _append_transcript(self, role: str, text: str, *, entry_id: str | None = None, status: str = "final") -> None:
+        normalized = normalize_whitespace(text).strip()
+        if not normalized:
+            return
+        with self._lock:
+            self.transcript.append(
+                {
+                    "id": entry_id or f"{role}_{uuid.uuid4().hex[:10]}",
+                    "role": role,
+                    "text": normalized,
+                    "timestamp": utc_now_iso(),
+                    "status": status,
+                }
+            )
+
+    def _handle_language_detection(self, detected_code: str) -> None:
+        mapped = language_id_for_sarvam_code(detected_code)
+        if not mapped:
+            return
+        with self._lock:
+            if mapped == self.active_language_id:
+                return
+            self.active_language_id = mapped
+            next_advice = default_language_advice(mapped)
+            next_advice["detected_language_id"] = mapped
+            next_advice["suggested_language_id"] = mapped
+            next_advice["should_switch"] = True
+            next_advice["confidence"] = "high"
+            next_advice["nudge"] = f"Customer switched to {mapped}. Reply in {mapped}."
+            self.language_advice = next_advice
+        self._append_transcript("system", next_advice["nudge"])
+
+    def _opening_text(self) -> str:
+        supported = supported_languages_payload()
+        opening_label = next(
+            (item.get("agent_label") for item in supported if item.get("id") == self.language_id),
+            "Hinglish",
+        )
+        return build_opening_text(self.customer, self.persona, str(opening_label))
+
+    def start_greeting(self) -> None:
+        with self._lock:
+            if self._greeting_started or self._stop:
+                return
+            self._greeting_started = True
+        opening_text = self._opening_text()
+        if opening_text:
+            self._speak_reply(opening_text)
+
+    def _cancel_active_playback(self, reason: str) -> None:
+        with self._lock:
+            if not self._current_response_id and not self._current_mark_name:
+                return
+            self._current_tts_serial += 1
+            self._current_response_id = None
+            self._current_mark_name = None
+            self._last_agent_speak_start_at = None
+            self._pending_barge_in_at = time.time()
+        self.log_event("playback_cleared", {"reason": reason})
+        try:
+            self._send_json({"event": "clear", "stream_sid": self.stream_sid})
+        except Exception:
+            pass
+
+    def _speak_reply(self, text: str) -> None:
+        normalized = normalize_whitespace(text).strip()
+        if not normalized:
+            return
+        with self._lock:
+            if self._stop:
+                return
+            if self._current_response_id:
+                self._cancel_active_playback("superseded")
+            self._current_tts_serial += 1
+            serial = self._current_tts_serial
+            response_id = f"utt_{uuid.uuid4().hex[:10]}"
+            mark_name = f"mark_{response_id}"
+            self._current_response_id = response_id
+            self._current_mark_name = mark_name
+            self._last_agent_speak_start_at = time.time()
+        self._append_transcript("assistant", normalized, entry_id=f"assistant_{response_id}")
+        self.log_event("assistant_reply", {"utterance_id": response_id, "text": normalized})
+        threading.Thread(
+            target=self._render_and_send_tts,
+            args=(serial, response_id, mark_name, normalized),
+            daemon=True,
+        ).start()
+
+    def _render_and_send_tts(self, serial: int, response_id: str, mark_name: str, text: str) -> None:
+        language_code = sarvam_language_code(self.active_language_id)
+        speech_text = prepare_sarvam_tts_text(text, language_code)
+        if not speech_text:
+            return
+        try:
+            wav_bytes = _sarvam_tts_rest(
+                speech_text,
+                self.voice,
+                language_code,
+                sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
+            )
+            pcm_bytes, _ = _wav_to_pcm(wav_bytes)
+        except Exception as exc:  # noqa: BLE001
+            self._append_transcript("system", f"Sarvam TTS error: {str(exc)[:200]}")
+            self.log_event("tts_error", {"message": str(exc)[:200]})
+            with self._lock:
+                if serial == self._current_tts_serial:
+                    self._current_response_id = None
+                    self._current_mark_name = None
+                    self._last_agent_speak_start_at = None
+            return
+
+        try:
+            record_sarvam_tts_usage(
+                chars=len(speech_text),
+                event_id=f"tts_{response_id}",
+                session_id=self.session_id,
+                model=SARVAM_TTS_MODEL,
+            )
+        except Exception:
+            pass
+
+        chunk_size = max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.1), 320)
+        for index in range(0, len(pcm_bytes), chunk_size):
+            with self._lock:
+                if self._stop or serial != self._current_tts_serial or not self.stream_sid:
+                    return
+                stream_sid = self.stream_sid
+            chunk = pcm_bytes[index : index + chunk_size]
+            if not chunk:
+                continue
+            try:
+                self._send_json(
+                    {
+                        "event": "media",
+                        "stream_sid": stream_sid,
+                        "media": {
+                            "payload": base64.b64encode(chunk).decode("ascii"),
+                        },
+                    }
+                )
+            except Exception:
+                return
+        with self._lock:
+            if self._stop or serial != self._current_tts_serial or not self.stream_sid:
+                return
+            stream_sid = self.stream_sid
+        try:
+            self._send_json(
+                {
+                    "event": "mark",
+                    "stream_sid": stream_sid,
+                    "mark": {"name": mark_name},
+                }
+            )
+        except Exception:
+            pass
+
+    def _close_stt_upstream(self, expected: Any | None = None, *, reset_billing: bool = False) -> None:
+        with self._lock:
+            upstream = self._stt_upstream
+            if expected is not None and upstream is not expected:
+                upstream = None
+            else:
+                self._stt_upstream = None
+            if reset_billing:
+                self._stt_audio_seconds_unbilled = 0.0
+        if upstream is None:
+            return
+        try:
+            upstream.close()
+        except Exception:
+            pass
+
+    def _open_stt_upstream(self) -> Any:
+        def _connect(language_code: str) -> Any:
+            params = urlencode(
+                {
+                    "language-code": language_code or "unknown",
+                    "model": SARVAM_STT_MODEL,
+                    "mode": SARVAM_STT_MODE,
+                    "sample_rate": EXOTEL_STREAM_SAMPLE_RATE,
+                    "input_audio_codec": "pcm_s16le",
+                    "flush_signal": "true",
+                }
+            )
+            return ws_client.create_connection(
+                f"{SARVAM_STT_WS_URL}?{params}",
+                header=[f"Api-Subscription-Key: {SARVAM_API_KEY}"],
+                timeout=15,
+            )
+
+        language_code = sarvam_stt_language_code(self.language_id)
+        try:
+            return _connect(language_code)
+        except Exception:
+            if language_code != "unknown":
+                raise
+            return _connect(sarvam_language_code(DEFAULT_LANGUAGE_ID))
+
+    def _ensure_stt_upstream(self) -> Any:
+        with self._lock:
+            upstream = self._stt_upstream
+        if upstream is None:
+            upstream = self._open_stt_upstream()
+            with self._lock:
+                current = self._stt_upstream
+                if current is None:
+                    self._stt_upstream = upstream
+                else:
+                    try:
+                        upstream.close()
+                    except Exception:
+                        pass
+                    upstream = current
+        if self._stt_thread is None or not self._stt_thread.is_alive():
+            self._stt_thread = threading.Thread(target=self._stt_pump, daemon=True)
+            self._stt_thread.start()
+        return upstream
+
+    def _stt_pump(self) -> None:
+        while True:
+            with self._lock:
+                stop = self._stop
+                upstream = self._stt_upstream
+            if stop:
+                return
+            if upstream is None:
+                time.sleep(0.05)
+                continue
+            try:
+                raw = upstream.recv()
+            except Exception:
+                self._close_stt_upstream(upstream)
+                continue
+            if not raw:
+                self._close_stt_upstream(upstream)
+                continue
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
+            except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            ptype = payload.get("type")
+            data = payload.get("data") or {}
+            text = (data.get("transcript") or payload.get("transcript") or payload.get("text") or "").strip()
+            detected = (
+                data.get("language_code")
+                or payload.get("language_code")
+                or payload.get("detected_language_code")
+                or sarvam_language_code(self.active_language_id)
+            )
+            if ptype == "error":
+                message = str(data.get("message") or "Sarvam STT upstream error")[:300]
+                self._append_transcript("system", f"Sarvam STT error: {message}")
+                self.log_event("stt_error", {"message": message})
+                self._close_stt_upstream(upstream)
+                continue
+            if ptype in {"partial", "interim"} and text:
+                self._handle_partial_transcript(text, str(detected))
+                continue
+            if ptype in {"data", "transcript", "final"} and text:
+                seconds = 0.0
+                with self._lock:
+                    seconds = self._stt_audio_seconds_unbilled
+                    self._stt_audio_seconds_unbilled = 0.0
+                if seconds > 0:
+                    try:
+                        record_sarvam_stt_usage(
+                            seconds=seconds,
+                            event_id=f"stt_{uuid.uuid4().hex[:10]}",
+                            session_id=self.session_id,
+                            model=SARVAM_STT_MODEL,
+                        )
+                    except Exception:
+                        pass
+                self._handle_final_transcript(text, str(detected))
+
+    def forward_audio(self, pcm_bytes: bytes) -> None:
+        if not pcm_bytes:
+            return
+        chunk_seconds = len(pcm_bytes) / (2 * max(EXOTEL_STREAM_SAMPLE_RATE, 1))
+        payload = json.dumps(
+            {
+                "audio": {
+                    "data": base64.b64encode(pcm_bytes).decode("ascii"),
+                    "sample_rate": str(EXOTEL_STREAM_SAMPLE_RATE),
+                    "encoding": "audio/wav",
+                }
+            }
+        )
+        sent = False
+        for _ in range(2):
+            try:
+                upstream = self._ensure_stt_upstream()
+                upstream.send(payload)
+                sent = True
+                break
+            except Exception:
+                self._close_stt_upstream(upstream if "upstream" in locals() else None)
+        if sent:
+            with self._lock:
+                self._stt_audio_seconds_unbilled += chunk_seconds
+
+    def _handle_partial_transcript(self, text: str, detected_code: str) -> None:
+        trimmed = normalize_whitespace(text).strip()
+        if not trimmed or is_likely_stt_hallucination(trimmed):
+            return
+        self._handle_language_detection(detected_code)
+        with self._lock:
+            active_response_id = self._current_response_id
+        if not active_response_id:
+            return
+        self._cancel_active_playback("barge_in_partial")
+
+    def _handle_final_transcript(self, text: str, detected_code: str) -> None:
+        trimmed = normalize_whitespace(text).strip()
+        if not trimmed:
+            return
+        self._handle_language_detection(detected_code)
+        with self._lock:
+            recent_barge_in = self._pending_barge_in_at and (time.time() - self._pending_barge_in_at < 2.0)
+            last_speak_at = self._last_agent_speak_start_at
+            active_response_id = self._current_response_id
+            self._pending_barge_in_at = None
+        if (
+            not recent_barge_in
+            and last_speak_at is not None
+            and active_response_id
+            and time.time() - last_speak_at < 0.9
+            and len(trimmed.split()) <= 2
+        ):
+            return
+        if is_stt_hallucination(trimmed):
+            self._append_transcript("system", "Dropped transcript hallucination (STT echoed prompt on silence).")
+            return
+        self._append_transcript("customer", trimmed)
+        with self._lock:
+            self._turn_commit_buffer.append(trimmed)
+            timer = self._turn_commit_timer
+        if timer is not None:
+            timer.cancel()
+        next_timer = threading.Timer(0.25, self._commit_buffered_turn)
+        next_timer.daemon = True
+        with self._lock:
+            self._turn_commit_timer = next_timer
+        next_timer.start()
+
+    def _commit_buffered_turn(self) -> None:
+        with self._lock:
+            merged = " ".join(self._turn_commit_buffer).strip()
+            self._turn_commit_buffer = []
+            self._turn_commit_timer = None
+        if not merged or is_likely_stt_hallucination(merged):
+            return
+        threading.Thread(target=self._run_unified_customer_turn, args=(merged,), daemon=True).start()
+
+    def _message_history(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [
+                {"role": entry["role"], "text": entry["text"]}
+                for entry in self.transcript
+                if entry.get("role") in {"assistant", "customer"}
+            ]
+
+    def _recent_transcript(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return deepcopy(self.transcript[-6:])
+
+    def _run_unified_customer_turn(self, transcript_text: str) -> None:
+        advice, _, lc_error = create_language_coach_review(
+            {
+                "transcript": transcript_text,
+                "current_language_id": self.active_language_id,
+                "preferred_language_id": self.language_id,
+                "recent_transcript": self._recent_transcript(),
+            }
+        )
+        if lc_error:
+            self._append_transcript("system", f"Language coach error: {lc_error}")
+            return
+        next_language_id = supported_render_language_id(advice.get("suggested_language_id") or self.active_language_id)
+        with self._lock:
+            self.language_advice = advice
+            self.active_language_id = next_language_id
+        if advice.get("should_switch") or advice.get("transcript_quality") != "good":
+            self._append_transcript("system", f"Language coach: {advice.get('nudge')}")
+
+        text, tool_calls, usage_events, error = run_chat_agent_turn(
+            self._message_history(),
+            self.voice,
+            self.account_number,
+            coaching_hints=self.coaching_hints[:5],
+            language_advice=advice,
+        )
+        for usage in usage_events:
+            try:
+                record_chat_agent_usage(CHAT_MODEL, usage)
+            except Exception:
+                pass
+        if error and not text and not tool_calls:
+            self._append_transcript("system", f"Call policy error: {error}")
+            return
+
+        self._apply_tool_calls(tool_calls)
+        if text and text.strip():
+            self._speak_reply(text)
+
+    def _apply_tool_calls(self, calls: list[dict[str, Any]]) -> None:
+        if not calls:
+            return
+        with self._lock:
+            self.tool_calls = list(calls[::-1]) + self.tool_calls
+        for call in calls:
+            next_disposition = determine_disposition(call.get("name") or "")
+            if next_disposition:
+                with self._lock:
+                    self.disposition = next_disposition
+            if call.get("name") == "get_invoices" and isinstance(call.get("result", {}).get("invoices"), list):
+                self.invoices = call["result"]["invoices"]
+            if call.get("name") == "get_customer" and call.get("result", {}).get("customer"):
+                self.customer = call["result"]["customer"]
+
+    def _run_supervisor_review(self) -> None:
+        issues, usage, error = create_supervisor_review(
+            {
+                "customer": self.customer,
+                "invoices": self.invoices,
+                "transcript": deepcopy(self.transcript),
+                "tool_calls": deepcopy(self.tool_calls),
+                "disposition": self.disposition,
+                "turn_number": self.turn_number,
+            }
+        )
+        if error:
+            self._append_transcript("system", f"Supervisor error: {error}")
+            return
+        if usage:
+            try:
+                record_supervisor_usage(SUPERVISOR_MODEL, usage)
+            except Exception:
+                pass
+        if issues:
+            update_board(issues)
+            self.coaching_hints = [str(issue.get("suggested_fix") or "").strip() for issue in issues if issue.get("suggested_fix")]
+            if self.coaching_hints:
+                self._append_transcript("system", f"Supervisor coach: {self.coaching_hints[0]}")
+
+    def handle_mark(self, name: str) -> None:
+        with self._lock:
+            if not name or name != self._current_mark_name:
+                return
+            self._current_response_id = None
+            self._current_mark_name = None
+            self._last_agent_speak_start_at = None
+            self.turn_number += 1
+        threading.Thread(target=self._run_supervisor_review, daemon=True).start()
+
+    def start_stream(self, stream_sid: str | None) -> None:
+        with self._lock:
+            self.stream_sid = str(stream_sid or "").strip() or self.stream_sid
+            if self.started_at is None:
+                self.started_at = utc_now()
+            self.status = "connected"
+        self.log_event("stream_started", {"stream_sid": self.stream_sid})
+        self.start_greeting()
+
+    def update_status(self, payload: dict[str, Any]) -> None:
+        self.log_event("status_callback", payload)
+        call_status = str(
+            payload.get("CallStatus")
+            or payload.get("Status")
+            or payload.get("status")
+            or ""
+        ).strip().lower()
+        if call_status in {"completed", "failed", "busy", "no-answer", "canceled"}:
+            self.finish(call_status)
+
+    def finish(self, reason: str) -> None:
+        with self._lock:
+            if self._finalized:
+                return
+            self._finalized = True
+            self._stop = True
+            self.status = reason or "completed"
+            self.ended_at = utc_now()
+            timer = self._turn_commit_timer
+            self._turn_commit_timer = None
+        if timer is not None:
+            timer.cancel()
+        self._close_stt_upstream(reset_billing=True)
+        self._cancel_active_playback("call_finished")
+        self.log_event("call_finished", {"reason": reason})
+        if self.transcript or self.tool_calls:
+            try:
+                summary, usage, error = create_call_summary(
+                    {
+                        "customer": self.customer,
+                        "invoices": self.invoices,
+                        "transcript": deepcopy(self.transcript),
+                        "tool_calls": deepcopy(self.tool_calls),
+                        "disposition": self.disposition,
+                    }
+                )
+                if not error:
+                    self.summary = summary
+                if usage:
+                    record_supervisor_usage(SUPERVISOR_MODEL, usage)
+            except Exception:
+                self.summary = None
+            try:
+                started_at = self.started_at or self.created_at
+                duration_sec = max(0, int((self.ended_at - started_at).total_seconds()))
+                costs = ledger_with_combined(load_ledger())
+                log_payload = {
+                    "account_number": self.account_number,
+                    "disposition": self.disposition,
+                    "transcript": deepcopy(self.transcript),
+                    "tool_calls": deepcopy(self.tool_calls),
+                    "duration_sec": duration_sec,
+                    "cost_usd": costs["combined"]["estimated_cost_usd"],
+                    "total_units": costs["combined"]["total_tokens"],
+                    "costs": costs,
+                    "summary": self.summary or {},
+                    "notes": f"Exotel phone demo to {self.target_number}",
+                }
+                entry = {
+                    "id": f"call_{uuid.uuid4().hex[:10]}",
+                    "account_number": log_payload["account_number"],
+                    "disposition": log_payload["disposition"],
+                    "transcript": log_payload["transcript"],
+                    "tool_calls": log_payload["tool_calls"],
+                    "duration_sec": log_payload["duration_sec"],
+                    "cost_usd": log_payload["cost_usd"],
+                    "total_units": log_payload["total_units"],
+                    "costs": log_payload["costs"],
+                    "summary": log_payload["summary"],
+                    "notes": log_payload["notes"],
+                    "timestamp": utc_now_iso(),
+                }
+                append_jsonl(CALL_LOG_FILE, entry)
+            except Exception:
+                pass
+
+
+def get_phone_call_session(*, session_id: str | None = None, call_sid: str | None = None) -> PhoneCallSession | None:
+    with PHONE_CALL_SESSIONS_LOCK:
+        if session_id:
+            return PHONE_CALL_SESSIONS.get(str(session_id).strip())
+        if call_sid:
+            mapped = PHONE_CALL_SESSIONS_BY_CALL_SID.get(str(call_sid).strip())
+            return PHONE_CALL_SESSIONS.get(mapped) if mapped else None
+    return None
+
+
+def has_active_phone_call_session() -> bool:
+    with PHONE_CALL_SESSIONS_LOCK:
+        for session in PHONE_CALL_SESSIONS.values():
+            snapshot = session.snapshot()
+            if snapshot["active"]:
+                return True
+    return False
 
 
 @app.post("/api/tool/<tool_name>")

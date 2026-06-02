@@ -174,6 +174,7 @@ class CostAccountingTests(unittest.TestCase):
         self.assertEqual(snapshot["observed"]["sarvam_tts_chars"], 239)
         self.assertEqual(snapshot["observed"]["sarvam_stt_seconds"], 3)
         self.assertEqual(snapshot["observed"]["chat_input_tokens"], 8910)
+        self.assertEqual(snapshot["observed"]["chat_cached_input_tokens"], 0)
         self.assertEqual(snapshot["observed"]["combined_units"], 9288)
         self.assertTrue(
             math.isclose(

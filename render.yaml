@@ -55,6 +55,18 @@ services:
         sync: false
       - key: SARVAM_STT_MODE
         value: codemix
+      - key: EXOTEL_ACCOUNT_SID
+        sync: false
+      - key: EXOTEL_API_KEY
+        sync: false
+      - key: EXOTEL_API_TOKEN
+        sync: false
+      - key: EXOTEL_API_BASE_URL
+        value: https://api.in.exotel.com
+      - key: EXOTEL_CALLER_ID
+        sync: false
+      - key: EXOTEL_STREAM_SAMPLE_RATE
+        value: "16000"
       - key: SARVAM_INR_PER_USD
         value: "96.13"
       - key: SARVAM_BULBUL_V3_INR_PER_10K_CHARS

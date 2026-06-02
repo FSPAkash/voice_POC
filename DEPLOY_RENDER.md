@@ -27,6 +27,10 @@ You must provide these secrets in Render:
 
 - `OPENAI_API_KEY`
 - `SARVAM_API_KEY`
+- `EXOTEL_ACCOUNT_SID`
+- `EXOTEL_API_KEY`
+- `EXOTEL_API_TOKEN`
+- `EXOTEL_CALLER_ID`
 
 The blueprint already provides sane defaults for the rest. The most important ones are:
 
@@ -50,6 +54,8 @@ The blueprint already provides sane defaults for the rest. The most important on
 - `SARVAM_TTS_SEND_COMPLETION_EVENT`
 - `SARVAM_STT_MODE`
 - `SARVAM_TTS_DICT_ID`
+- `EXOTEL_API_BASE_URL`
+- `EXOTEL_STREAM_SAMPLE_RATE`
 - `SARVAM_INR_PER_USD`
 - `SARVAM_BULBUL_V3_INR_PER_10K_CHARS`
 - `SARVAM_BULBUL_V2_INR_PER_10K_CHARS`
@@ -80,6 +86,8 @@ If you do not set it, deploy still works; you just lose the dictionary-based pro
 2. Commit [render.yaml](./render.yaml), [DEPLOY_RENDER.md](./DEPLOY_RENDER.md), and your Sarvam code changes.
 3. Confirm the service in Render has both `OPENAI_API_KEY` and `SARVAM_API_KEY`.
 4. If you are using a Sarvam dictionary locally, copy that dictionary ID into Render as `SARVAM_TTS_DICT_ID`.
+5. Set `EXOTEL_ACCOUNT_SID`, `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, and `EXOTEL_CALLER_ID` in Render.
+6. Make sure `RENDER_EXTERNAL_URL` exactly matches the public service URL, because Exotel uses it for the outbound status callback and live `wss://` media bridge.
 
 ### After redeploy
 
@@ -90,6 +98,53 @@ Smoke-test these before you call it done:
 3. Interrupt the agent once and confirm the call keeps listening.
 4. Switch from Hindi to English and confirm the next turn actually changes language.
 5. Open the pricing panel and confirm both `Sarvam Speech` and `GPT Policy` show non-zero usage after a real turn.
+
+## Exotel phone demo
+
+This repo now supports Exotel as a pure telephony layer for the existing app:
+
+- Exotel places the PSTN call.
+- Exotel streams call audio to `wss://<your-render-url>/api/exotel/media`.
+- The backend keeps using the same Sarvam STT/TTS + GPT collections flow.
+- Post-call summary, tool calls, and cost logging still run in the backend.
+
+### Render setup for Exotel
+
+After your GitHub push redeploys, set these env vars in the Render service:
+
+- `EXOTEL_ACCOUNT_SID`
+- `EXOTEL_API_KEY`
+- `EXOTEL_API_TOKEN`
+- `EXOTEL_CALLER_ID`
+- `EXOTEL_API_BASE_URL`
+Default: `https://api.in.exotel.com`
+- `EXOTEL_STREAM_SAMPLE_RATE`
+Default: `16000`
+- `RENDER_EXTERNAL_URL`
+Example: `https://dhl-poc.onrender.com`
+
+### Start a real phone call
+
+Once the service is live, trigger the outbound demo call with:
+
+```bash
+curl -X POST https://<your-render-url>/api/exotel/calls/start ^
+  -H "Content-Type: application/json" ^
+  -d "{\"to_number\":\"+919136152622\",\"language_id\":\"hinglish\",\"voice\":\"shubh\"}"
+```
+
+You can inspect the active phone call state at:
+
+- `GET /api/exotel/calls/active`
+
+### What to expect
+
+- The backend resets the cost ledger when a phone demo call starts, just like the browser demo does when you click `Start Call`.
+- Only one Exotel phone demo call is allowed at a time, because the current dashboard cost ledger is still single-session.
+- If the call never reaches the media bridge, check the Render logs first:
+  - outbound `Calls/connect` response
+  - hits to `/api/exotel/status`
+  - hits to `/api/exotel/media`
 
 ## Keep-alive (free plan)
 
