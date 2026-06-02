@@ -121,6 +121,19 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(payload["StreamType"], "bidirectional")
         self.assertEqual(payload["StatusCallbackEvents[]"], "terminal")
 
+    def test_exotel_basic_auth_header_matches_expected_scheme(self) -> None:
+        original_key = policy_app.EXOTEL_API_KEY
+        original_token = policy_app.EXOTEL_API_TOKEN
+        try:
+            policy_app.EXOTEL_API_KEY = "key123"
+            policy_app.EXOTEL_API_TOKEN = "token456"
+            header = policy_app.exotel_basic_auth_header()
+        finally:
+            policy_app.EXOTEL_API_KEY = original_key
+            policy_app.EXOTEL_API_TOKEN = original_token
+
+        self.assertEqual(header, "Basic a2V5MTIzOnRva2VuNDU2")
+
     def test_parse_exotel_call_sid_reads_xml_response(self) -> None:
         raw = """<?xml version="1.0" encoding="UTF-8"?>
 <TwilioResponse>

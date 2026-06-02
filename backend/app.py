@@ -108,6 +108,13 @@ def _normalize_https_base_url(raw: str | None, default: str) -> str:
         value = f"https://{value.lstrip('/')}"
     return value.rstrip("/")
 
+
+def _strip_matching_quotes(value: str | None) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return text
+
 # Sarvam — replaces OpenAI realtime for both STT and TTS.
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 SARVAM_BASE_URL = os.environ.get("SARVAM_BASE_URL", "https://api.sarvam.ai")
@@ -145,14 +152,14 @@ SARVAM_STT_MODE = (os.environ.get("SARVAM_STT_MODE", "codemix") or "codemix").st
 if SARVAM_STT_MODE not in {"transcribe", "translate", "verbatim", "translit", "codemix"}:
     SARVAM_STT_MODE = "codemix"
 
-EXOTEL_ACCOUNT_SID = (os.environ.get("EXOTEL_ACCOUNT_SID", "") or "").strip()
-EXOTEL_API_KEY = (os.environ.get("EXOTEL_API_KEY", "") or "").strip()
-EXOTEL_API_TOKEN = (os.environ.get("EXOTEL_API_TOKEN", "") or "").strip()
+EXOTEL_ACCOUNT_SID = _strip_matching_quotes(os.environ.get("EXOTEL_ACCOUNT_SID", ""))
+EXOTEL_API_KEY = _strip_matching_quotes(os.environ.get("EXOTEL_API_KEY", ""))
+EXOTEL_API_TOKEN = _strip_matching_quotes(os.environ.get("EXOTEL_API_TOKEN", ""))
 EXOTEL_API_BASE_URL = _normalize_https_base_url(
-    os.environ.get("EXOTEL_API_BASE_URL"),
+    _strip_matching_quotes(os.environ.get("EXOTEL_API_BASE_URL")),
     "https://api.in.exotel.com",
 )
-EXOTEL_CALLER_ID = (os.environ.get("EXOTEL_CALLER_ID", "") or "").strip()
+EXOTEL_CALLER_ID = _strip_matching_quotes(os.environ.get("EXOTEL_CALLER_ID", ""))
 EXOTEL_STREAM_SAMPLE_RATE = 8000
 EXOTEL_STREAM_PATH = (os.environ.get("EXOTEL_STREAM_PATH", "/api/exotel/media") or "/api/exotel/media").strip() or "/api/exotel/media"
 
@@ -388,6 +395,11 @@ def build_exotel_connect_payload(
         "StreamType": "bidirectional",
         "StreamTimeout": "86400",
     }
+
+
+def exotel_basic_auth_header() -> str:
+    token = base64.b64encode(f"{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
 
 
 def language_id_for_sarvam_code(language_code: str) -> str | None:
@@ -4246,7 +4258,10 @@ def exotel_start_call():
         multipart_payload = {key: (None, value) for key, value in outbound_payload.items()}
         response = requests.post(
             f"{EXOTEL_API_BASE_URL}/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect",
-            auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
+            headers={
+                "Authorization": exotel_basic_auth_header(),
+                "Accept": "application/xml, text/xml, */*",
+            },
             files=multipart_payload,
             timeout=30,
         )
