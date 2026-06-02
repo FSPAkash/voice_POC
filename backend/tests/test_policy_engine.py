@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+import json
 
 from backend import app as policy_app
 
@@ -169,6 +170,20 @@ class PolicyEngineTests(unittest.TestCase):
         )
 
         self.assertFalse(echoed)
+
+    def test_should_apply_language_switch_hint_ignores_single_syllable_noise(self) -> None:
+        self.assertFalse(policy_app.should_apply_language_switch_hint("ம்"))
+        self.assertFalse(policy_app.should_apply_language_switch_hint("जी"))
+
+    def test_should_apply_language_switch_hint_allows_explicit_language_request(self) -> None:
+        self.assertTrue(policy_app.should_apply_language_switch_hint("தமிழில் பேசுங்கள்"))
+
+    def test_build_llm_grounding_snapshot_is_compact_json(self) -> None:
+        payload = json.loads(policy_app.build_llm_grounding_snapshot("DHL001"))
+
+        self.assertEqual(payload["customer"]["account_number"], "DHL001")
+        self.assertEqual(payload["totals"]["total_outstanding_inr"], 57920)
+        self.assertEqual(len(payload["invoices"]), 3)
 
     def test_phone_session_short_partial_needs_real_speech_before_barge_in(self) -> None:
         session = policy_app.PhoneCallSession(

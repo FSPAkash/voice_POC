@@ -1078,6 +1078,19 @@ def looks_like_agent_echo(transcript_text: str, assistant_text: str) -> bool:
     return shared >= 3 and (shared / max(len(informative_customer), 1)) >= 0.75
 
 
+def should_apply_language_switch_hint(text: str) -> bool:
+    trimmed = normalize_whitespace(text).strip()
+    if not trimmed:
+        return False
+    if explicit_language_request_language_id(trimmed):
+        return True
+    tokens = stt_word_tokens(trimmed)
+    if len(tokens) >= 2:
+        return True
+    non_ascii_chars = sum(1 for char in trimmed if ord(char) > 127 and not char.isspace())
+    return non_ascii_chars >= 4
+
+
 def extract_json_payload(raw_text: str) -> dict[str, Any]:
     cleaned = raw_text.strip()
     if cleaned.startswith("```"):
@@ -3539,6 +3552,53 @@ def build_grounded_context(account_number: str) -> str:
     ])
 
 
+@lru_cache(maxsize=16)
+def build_llm_grounding_snapshot(account_number: str) -> str:
+    customer = get_customer(account_number) or {}
+    invoices = get_invoices(account_number)
+    constants = get_collections_constants()
+    methods = get_payment_methods()
+    snapshot = {
+        "customer": {
+            "account_number": customer.get("account_number"),
+            "company_name": customer.get("company_name"),
+            "primary_contact": customer.get("contact_name"),
+            "alternate_contact": customer.get("alternate_contact_name"),
+            "registered_email": customer.get("registered_email"),
+            "phone": customer.get("phone"),
+            "payment_terms": customer.get("payment_terms"),
+            "language_preferences": customer.get("language_preferences") or [],
+            "collection_notes": customer.get("collection_notes") or [],
+        },
+        "invoices": [
+            {
+                "invoice_no": inv.get("invoice_no"),
+                "invoice_type": inv.get("invoice_type"),
+                "amount_inr": inv.get("amount"),
+                "due_date": inv.get("due_date"),
+                "overdue_days": inv.get("overdue_days"),
+                "history": inv.get("history") or [],
+            }
+            for inv in invoices
+        ],
+        "totals": {
+            "invoice_count": len(invoices),
+            "total_outstanding_inr": customer_outstanding(invoices),
+        },
+        "payment_methods": [
+            {"label": method.get("label"), "details": method.get("details")}
+            for method in methods
+        ],
+        "policy_constants": {
+            "promise_to_pay_max_business_days": constants.get("promise_date_max_business_days"),
+            "proof_of_payment_email": constants.get("proof_of_payment_email"),
+            "monthly_collection_target_day": constants.get("monthly_collection_target_day"),
+            "allowed_payment_methods": ["DHL MyBill", "Virtual Account Number bank transfer"],
+        },
+    }
+    return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+
+
 def llm_collections_turn(
     messages: list[dict[str, Any]],
     account_number: str,
@@ -3573,6 +3633,7 @@ def llm_collections_turn(
             transcript_lines.append(f"SYSTEM: {text}")
 
     grounded = build_grounded_context(account_number)
+    compact_grounding = build_llm_grounding_snapshot(account_number)
     language_directive = {
         "english": "HARD LANGUAGE LOCK: reply 100% in English. Zero Hindi/Hinglish/Bengali words. No 'aap', 'main', 'hoon', 'kar', 'kya', 'haan', 'ji', 'namaste'. Use only English script and English vocabulary.",
         "hinglish": (
@@ -3603,29 +3664,21 @@ def llm_collections_turn(
         ),
     }.get(suggested, f"Reply in {suggested}.")
 
-    ground_truth_doc = load_ground_truth_doc()
+    recent_transcript_lines = transcript_lines[-8:]
     user_prompt = "\n".join([
         f"AGENT PERSONA: {persona['name']} ({persona['gender']}). Voice: {voice or DEFAULT_REALTIME_VOICE}.",
         f"Suggested reply language: {suggested}. Detected customer language: {detected}.",
         language_directive,
         f"Language coach note: {nudge}",
         "",
-        "=========================================================",
-        "CANONICAL GROUND TRUTH DOCUMENT (the ONLY source of truth):",
-        "Every name, invoice number, amount, date, overdue-day count,",
-        "history line, payment method, and policy constant you speak",
-        "MUST come from the document below or the live grounded context",
-        "that follows it. Do not invent, round, blend, or approximate.",
-        "If a fact is not in here, omit it from your reply.",
-        "=========================================================",
-        ground_truth_doc or "(GROUND_TRUTH.md not found — refuse to quote any specific number, name, or date.)",
-        "=========================================================",
+        "CANONICAL FACTS JSON (derived from the same ground-truth source used by the app):",
+        compact_grounding,
         "",
-        "LIVE GROUNDED CONTEXT FOR THIS CALL (mirrors the doc above):",
+        "LIVE GROUNDED CONTEXT FOR THIS CALL:",
         grounded,
         "",
         "TRANSCRIPT SO FAR:",
-        *(transcript_lines or ["(no turns yet — this is the very first agent line)"]),
+        *(recent_transcript_lines or ["(no turns yet — this is the very first agent line)"]),
         "",
         "STYLE TARGET:",
         "- Outbound DHL collections call.",
@@ -3636,7 +3689,7 @@ def llm_collections_turn(
         "- No overly polished or announcer-like phrasing.",
         "",
         "Produce the next agent turn now as JSON per the schema in the system message.",
-        "Reminder: every numeric/name/date you state must appear verbatim in the GROUND TRUTH document above. Anything else is a fabrication and forbidden.",
+        "Reminder: every numeric/name/date you state must appear verbatim in the facts above. Anything else is a fabrication and forbidden.",
     ])
 
     usage_events: list[Any] = []
@@ -3648,6 +3701,7 @@ def llm_collections_turn(
                 {"role": "user", "content": user_prompt},
             ],
             response_format={"type": "json_object"},
+            max_tokens=220,
             **_chat_kwargs(CHAT_MODEL, 0.4),
         )
     except Exception as exc:  # noqa: BLE001
@@ -3695,6 +3749,7 @@ def llm_collections_turn(
                     },
                 ],
                 response_format={"type": "json_object"},
+                max_tokens=220,
                 **_chat_kwargs(CHAT_MODEL, 0.1),
             )
             if retry.usage:
@@ -3726,6 +3781,7 @@ def llm_collections_turn(
                     {"role": "user", "content": "Your previous reply contained Hinglish/Hindi words. Rewrite the same reply 100% in English. Keep all facts and intent identical. Return JSON in the same schema."},
                 ],
                 response_format={"type": "json_object"},
+                max_tokens=220,
                 **_chat_kwargs(CHAT_MODEL, 0.2),
             )
             if retry.usage:
@@ -5259,7 +5315,9 @@ class PhoneCallSession:
         threading.Thread(target=self._run_supervisor_review, daemon=True).start()
         return True
 
-    def _handle_language_detection(self, detected_code: str) -> None:
+    def _handle_language_detection(self, detected_code: str, text: str = "") -> None:
+        if text and not should_apply_language_switch_hint(text):
+            return
         mapped = language_id_for_sarvam_code(detected_code)
         if not mapped:
             return
@@ -5690,7 +5748,6 @@ class PhoneCallSession:
         trimmed = normalize_whitespace(text).strip()
         if not trimmed or is_likely_stt_hallucination(trimmed):
             return
-        self._handle_language_detection(detected_code)
         with self._lock:
             active_response_id = self._current_response_id
             active_response_text = self._current_response_text or self._latest_assistant_text()
@@ -5710,7 +5767,6 @@ class PhoneCallSession:
         trimmed = normalize_whitespace(text).strip()
         if not trimmed:
             return
-        self._handle_language_detection(detected_code)
         tokens = stt_word_tokens(trimmed)
         now = time.time()
         with self._lock:
@@ -5740,6 +5796,7 @@ class PhoneCallSession:
         if is_stt_hallucination(trimmed):
             self._append_transcript("system", "Dropped transcript hallucination (STT echoed prompt on silence).")
             return
+        self._handle_language_detection(detected_code, trimmed)
         self._append_transcript("customer", trimmed)
         with self._lock:
             self._turn_commit_buffer.append(trimmed)
@@ -5774,6 +5831,8 @@ class PhoneCallSession:
             return deepcopy(self.transcript[-6:])
 
     def _run_unified_customer_turn(self, transcript_text: str) -> None:
+        turn_started_at = time.time()
+        self.log_event("turn_processing_started", {"text": transcript_text[:120]})
         advice, _, lc_error = create_language_coach_review(
             {
                 "transcript": transcript_text,
@@ -5798,6 +5857,15 @@ class PhoneCallSession:
             self.account_number,
             coaching_hints=self.coaching_hints[:5],
             language_advice=advice,
+        )
+        self.log_event(
+            "turn_processing_finished",
+            {
+                "duration_ms": int(round((time.time() - turn_started_at) * 1000)),
+                "has_reply": bool(text and text.strip()),
+                "tool_call_count": len(tool_calls),
+                "error": bool(error),
+            },
         )
         for usage in usage_events:
             try:
