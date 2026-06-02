@@ -4338,13 +4338,11 @@ def exotel_media(ws):
     if not WEBSOCKET_CLIENT_AVAILABLE:
         ws.send(json.dumps({"event": "error", "message": "websocket-client not installed"}))
         return
-    session_id = str(request.args.get("session_id") or "").strip()
-    session = get_phone_call_session(session_id=session_id or None)
-    if not session:
-        ws.send(json.dumps({"event": "error", "message": "Unknown or expired phone session"}))
-        return
-    session.attach_transport(ws)
-    session.log_event("websocket_connected", {"session_id": session_id})
+    requested_session_id = str(request.args.get("session_id") or "").strip()
+    session = get_phone_call_session(session_id=requested_session_id or None)
+    if session is not None:
+        session.attach_transport(ws)
+        session.log_event("websocket_connected", {"session_id": requested_session_id})
     disconnected_reason = "stream_disconnected"
     try:
         while True:
@@ -4359,7 +4357,8 @@ def exotel_media(ws):
                 continue
             event_type = str(payload.get("event") or "").strip().lower()
             if event_type == "connected":
-                session.log_event("connected", payload)
+                if session is not None:
+                    session.log_event("connected", payload)
                 continue
             if event_type == "start":
                 start_payload = payload.get("start") if isinstance(payload.get("start"), dict) else {}
@@ -4377,11 +4376,28 @@ def exotel_media(ws):
                     or payload.get("call_sid")
                     or ""
                 ).strip()
+                if session is None:
+                    session = get_phone_call_session(call_sid=call_sid or None)
+                if session is None and requested_session_id:
+                    session = get_phone_call_session(session_id=requested_session_id)
+                if session is None:
+                    session = get_single_active_phone_call_session()
+                if session is None:
+                    ws.send(json.dumps({"event": "error", "message": "Unknown or expired phone session"}))
+                    disconnected_reason = "unknown_session"
+                    break
+                session.attach_transport(ws)
+                session.log_event(
+                    "websocket_connected",
+                    {"session_id": session.session_id, "requested_session_id": requested_session_id},
+                )
                 if call_sid:
                     session.register_call_sid(call_sid)
                 session.start_stream(stream_sid)
                 continue
             if event_type == "media":
+                if session is None:
+                    continue
                 media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
                 b64 = str(media.get("payload") or "").strip()
                 if not b64:
@@ -4392,18 +4408,23 @@ def exotel_media(ws):
                     continue
                 continue
             if event_type == "mark":
+                if session is None:
+                    continue
                 mark_payload = payload.get("mark") if isinstance(payload.get("mark"), dict) else {}
                 session.handle_mark(str(mark_payload.get("name") or "").strip())
                 continue
             if event_type == "stop":
                 disconnected_reason = "completed"
-                session.finish("completed")
+                if session is not None:
+                    session.finish("completed")
                 break
             if event_type == "dtmf":
-                session.log_event("dtmf", payload)
+                if session is not None:
+                    session.log_event("dtmf", payload)
                 continue
     finally:
-        session.finish(disconnected_reason)
+        if session is not None:
+            session.finish(disconnected_reason)
 
 
 @sock.route("/api/tts/stream")
@@ -5645,6 +5666,15 @@ def prune_stale_phone_call_sessions(timeout_seconds: int = 90) -> None:
         created_at = session.created_at
         if (now - created_at).total_seconds() >= timeout_seconds:
             session.finish("startup_timeout")
+
+
+def get_single_active_phone_call_session() -> PhoneCallSession | None:
+    prune_stale_phone_call_sessions()
+    with PHONE_CALL_SESSIONS_LOCK:
+        active_sessions = [session for session in PHONE_CALL_SESSIONS.values() if session.snapshot()["active"]]
+    if len(active_sessions) == 1:
+        return active_sessions[0]
+    return None
 
 
 def has_active_phone_call_session() -> bool:
