@@ -162,6 +162,9 @@ EXOTEL_API_BASE_URL = _normalize_https_base_url(
 EXOTEL_CALLER_ID = _strip_matching_quotes(os.environ.get("EXOTEL_CALLER_ID", ""))
 EXOTEL_STREAM_SAMPLE_RATE = 8000
 EXOTEL_STREAM_PATH = (os.environ.get("EXOTEL_STREAM_PATH", "/api/exotel/media") or "/api/exotel/media").strip() or "/api/exotel/media"
+PHONE_STT_MIN_SPEECH_SECONDS = _env_float("PHONE_STT_MIN_SPEECH_SECONDS", 0.15, minimum=0.05, maximum=1.0)
+PHONE_STT_SILENCE_FLUSH_SECONDS = _env_float("PHONE_STT_SILENCE_FLUSH_SECONDS", 0.25, minimum=0.05, maximum=1.0)
+PHONE_TURN_COMMIT_DELAY_SECONDS = _env_float("PHONE_TURN_COMMIT_DELAY_SECONDS", 0.1, minimum=0.0, maximum=1.0)
 
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
@@ -4396,6 +4399,31 @@ def _sarvam_tts_rest(text: str, voice: str, language_code: str, *, sample_rate: 
     return base64.b64decode(audios[0])
 
 
+def _open_sarvam_tts_upstream(language_code: str, voice: str, *, sample_rate: int) -> Any:
+    if not SARVAM_API_KEY:
+        raise RuntimeError("SARVAM_API_KEY missing")
+    if not WEBSOCKET_CLIENT_AVAILABLE:
+        raise RuntimeError("websocket-client not installed")
+    url = f"{SARVAM_TTS_WS_URL}?{urlencode({'model': SARVAM_TTS_MODEL, 'send_completion_event': str(SARVAM_TTS_SEND_COMPLETION_EVENT).lower()})}"
+    upstream = ws_client.create_connection(
+        url,
+        header=[f"api-subscription-key: {SARVAM_API_KEY}"],
+        timeout=15,
+    )
+    upstream.send(json.dumps({
+        "type": "config",
+        "data": {
+            **sarvam_tts_options(language_code, voice),
+            "speech_sample_rate": str(sample_rate),
+            "min_buffer_size": SARVAM_TTS_MIN_BUFFER_SIZE,
+            "max_chunk_length": SARVAM_TTS_MAX_CHUNK_LENGTH,
+            "output_audio_codec": SARVAM_TTS_OUTPUT_CODEC,
+            "output_audio_bitrate": SARVAM_TTS_OUTPUT_BITRATE,
+        },
+    }))
+    return upstream
+
+
 @sock.route(EXOTEL_STREAM_PATH)
 def exotel_media(ws):
     if not WEBSOCKET_CLIENT_AVAILABLE:
@@ -5102,6 +5130,7 @@ class PhoneCallSession:
         self._current_mark_name: str | None = None
         self._current_response_text: str | None = None
         self._current_tts_serial = 0
+        self._tts_upstream: Any | None = None
         self._playback_finish_timer: threading.Timer | None = None
         self._last_agent_speak_start_at: float | None = None
         self._pending_barge_in_at: float | None = None
@@ -5202,6 +5231,20 @@ class PhoneCallSession:
         if timer is not None:
             timer.cancel()
 
+    def _close_tts_upstream(self, expected: Any | None = None) -> None:
+        with self._lock:
+            upstream = self._tts_upstream
+            if expected is not None and upstream is not expected:
+                upstream = None
+            else:
+                self._tts_upstream = None
+        if upstream is None:
+            return
+        try:
+            upstream.close()
+        except Exception:
+            pass
+
     def _complete_active_playback(self, serial: int, mark_name: str, source: str) -> bool:
         with self._lock:
             if serial != self._current_tts_serial or mark_name != self._current_mark_name:
@@ -5261,6 +5304,7 @@ class PhoneCallSession:
             self._current_response_text = None
             self._last_agent_speak_start_at = None
             self._pending_barge_in_at = time.time()
+        self._close_tts_upstream()
         self.log_event("playback_cleared", {"reason": reason})
         try:
             self._send_json({"event": "clear", "stream_sid": self.stream_sid})
@@ -5297,28 +5341,6 @@ class PhoneCallSession:
         speech_text = prepare_sarvam_tts_text(text, language_code)
         if not speech_text:
             return
-        try:
-            wav_bytes = _sarvam_tts_rest(
-                speech_text,
-                self.voice,
-                language_code,
-                sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
-            )
-            pcm_bytes, _ = _wav_to_pcm(
-                wav_bytes,
-                fallback_sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._append_transcript("system", f"Sarvam TTS error: {str(exc)[:200]}")
-            self.log_event("tts_error", {"message": str(exc)[:200]})
-            with self._lock:
-                if serial == self._current_tts_serial:
-                    self._cancel_playback_finish_timer_locked()
-                    self._current_response_id = None
-                    self._current_mark_name = None
-                    self._current_response_text = None
-                    self._last_agent_speak_start_at = None
-            return
 
         try:
             record_sarvam_tts_usage(
@@ -5330,27 +5352,133 @@ class PhoneCallSession:
         except Exception:
             pass
 
-        chunk_size = max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.1), 320)
-        for index in range(0, len(pcm_bytes), chunk_size):
+        pcm_bytes = b""
+        sent_audio_bytes = 0
+        send_started_at = time.time()
+        logged_first_audio = False
+        try:
+            upstream = _open_sarvam_tts_upstream(
+                language_code,
+                self.voice,
+                sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
+            )
             with self._lock:
-                if self._stop or serial != self._current_tts_serial or not self.stream_sid:
+                if self._stop or serial != self._current_tts_serial:
+                    try:
+                        upstream.close()
+                    except Exception:
+                        pass
                     return
-                stream_sid = self.stream_sid
-            chunk = pcm_bytes[index : index + chunk_size]
-            if not chunk:
-                continue
+                self._tts_upstream = upstream
+            upstream.send(json.dumps({"type": "text", "data": {"text": speech_text}}))
+            upstream.send(json.dumps({"type": "flush"}))
+
+            while True:
+                try:
+                    raw = upstream.recv()
+                except Exception:
+                    break
+                if not raw:
+                    break
+                try:
+                    payload = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
+                except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                with self._lock:
+                    if self._stop or serial != self._current_tts_serial or self._tts_upstream is not upstream:
+                        return
+                    stream_sid = self.stream_sid
+                ptype = str(payload.get("type") or "")
+                data = payload.get("data") or {}
+                event_type = str(data.get("event_type") or payload.get("event_type") or "").lower()
+                if ptype == "audio":
+                    b64 = data.get("audio") or ""
+                    if not b64 or not stream_sid:
+                        continue
+                    try:
+                        chunk = base64.b64decode(b64)
+                    except Exception:
+                        continue
+                    if not chunk:
+                        continue
+                    sent_audio_bytes += len(chunk)
+                    if not logged_first_audio:
+                        logged_first_audio = True
+                        self.log_event("tts_first_audio", {"source": "sarvam_stream"})
+                    self._send_json(
+                        {
+                            "event": "media",
+                            "stream_sid": stream_sid,
+                            "media": {
+                                "payload": base64.b64encode(chunk).decode("ascii"),
+                            },
+                        }
+                    )
+                    continue
+                if ptype == "error":
+                    raise RuntimeError(str(data.get("message") or "Sarvam upstream error")[:200])
+                if ptype in {"event", "completion", "completed", "done"} or event_type in {
+                    "completion",
+                    "completed",
+                    "done",
+                    "finish",
+                    "finished",
+                }:
+                    break
+
+            if sent_audio_bytes <= 0:
+                raise RuntimeError("Sarvam TTS stream returned no audio")
+        except Exception:
             try:
-                self._send_json(
-                    {
-                        "event": "media",
-                        "stream_sid": stream_sid,
-                        "media": {
-                            "payload": base64.b64encode(chunk).decode("ascii"),
-                        },
-                    }
+                wav_bytes = _sarvam_tts_rest(
+                    speech_text,
+                    self.voice,
+                    language_code,
+                    sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
                 )
-            except Exception:
+                pcm_bytes, _ = _wav_to_pcm(
+                    wav_bytes,
+                    fallback_sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._append_transcript("system", f"Sarvam TTS error: {str(exc)[:200]}")
+                self.log_event("tts_error", {"message": str(exc)[:200]})
+                with self._lock:
+                    if serial == self._current_tts_serial:
+                        self._cancel_playback_finish_timer_locked()
+                        self._current_response_id = None
+                        self._current_mark_name = None
+                        self._current_response_text = None
+                        self._last_agent_speak_start_at = None
                 return
+            chunk_size = max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.05), 320)
+            for index in range(0, len(pcm_bytes), chunk_size):
+                with self._lock:
+                    if self._stop or serial != self._current_tts_serial or not self.stream_sid:
+                        return
+                    stream_sid = self.stream_sid
+                chunk = pcm_bytes[index : index + chunk_size]
+                if not chunk:
+                    continue
+                sent_audio_bytes += len(chunk)
+                if not logged_first_audio:
+                    logged_first_audio = True
+                    self.log_event("tts_first_audio", {"source": "sarvam_rest_fallback"})
+                try:
+                    self._send_json(
+                        {
+                            "event": "media",
+                            "stream_sid": stream_sid,
+                            "media": {
+                                "payload": base64.b64encode(chunk).decode("ascii"),
+                            },
+                        }
+                    )
+                except Exception:
+                    return
+        finally:
+            self._close_tts_upstream()
+
         with self._lock:
             if self._stop or serial != self._current_tts_serial or not self.stream_sid:
                 return
@@ -5365,9 +5493,10 @@ class PhoneCallSession:
             )
         except Exception:
             pass
-        playback_seconds = len(pcm_bytes) / (2 * max(EXOTEL_STREAM_SAMPLE_RATE, 1))
+        playback_seconds = sent_audio_bytes / (2 * max(EXOTEL_STREAM_SAMPLE_RATE, 1))
+        remaining_playback_seconds = max(playback_seconds - max(time.time() - send_started_at, 0.0), 0.0)
         fallback_timer = threading.Timer(
-            playback_seconds + 0.45,
+            remaining_playback_seconds + 0.2,
             self._complete_active_playback,
             args=(serial, mark_name, "timer_fallback"),
         )
@@ -5496,6 +5625,7 @@ class PhoneCallSession:
                 self._handle_partial_transcript(text, str(detected))
                 continue
             if ptype in {"data", "transcript", "final"} and text:
+                self.log_event("stt_final_received", {"text": text[:120]})
                 seconds = 0.0
                 with self._lock:
                     seconds = self._stt_audio_seconds_unbilled
@@ -5548,8 +5678,8 @@ class PhoneCallSession:
                 elif self._speech_seconds_since_flush > 0:
                     self._silence_seconds_since_speech += chunk_seconds
                     should_flush = (
-                        self._silence_seconds_since_speech >= 0.45
-                        and self._speech_seconds_since_flush >= 0.25
+                        self._silence_seconds_since_speech >= PHONE_STT_SILENCE_FLUSH_SECONDS
+                        and self._speech_seconds_since_flush >= PHONE_STT_MIN_SPEECH_SECONDS
                         and not self._flush_sent_for_current_pause
                     )
                     if should_flush:
@@ -5616,7 +5746,7 @@ class PhoneCallSession:
             timer = self._turn_commit_timer
         if timer is not None:
             timer.cancel()
-        next_timer = threading.Timer(0.25, self._commit_buffered_turn)
+        next_timer = threading.Timer(PHONE_TURN_COMMIT_DELAY_SECONDS, self._commit_buffered_turn)
         next_timer.daemon = True
         with self._lock:
             self._turn_commit_timer = next_timer
