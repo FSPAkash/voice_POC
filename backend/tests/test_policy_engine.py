@@ -154,6 +154,87 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(converted, pcm)
         self.assertEqual(sample_rate, 16000)
 
+    def test_looks_like_agent_echo_flags_replayed_prompt(self) -> None:
+        echoed = policy_app.looks_like_agent_echo(
+            "This is Yogesh from DHL Express India",
+            "Good afternoon, this is Yogesh from DHL Express India. Am I speaking with Mr Anthony Gressive?",
+        )
+
+        self.assertTrue(echoed)
+
+    def test_looks_like_agent_echo_keeps_real_customer_answer(self) -> None:
+        echoed = policy_app.looks_like_agent_echo(
+            "Yes, this is Anthony speaking.",
+            "Good afternoon, this is Yogesh from DHL Express India. Am I speaking with Mr Anthony Gressive?",
+        )
+
+        self.assertFalse(echoed)
+
+    def test_phone_session_short_partial_needs_real_speech_before_barge_in(self) -> None:
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+        session._current_response_id = "utt_demo"
+        session._current_mark_name = "mark_utt_demo"
+        session._current_response_text = "Am I speaking with Mr Anthony Gressive?"
+        session._speech_seconds_since_flush = 0.1
+
+        session._handle_partial_transcript("yes", "en-IN")
+
+        self.assertEqual(session._current_response_id, "utt_demo")
+
+        session._speech_seconds_since_flush = 0.35
+        session._handle_partial_transcript("yes", "en-IN")
+
+        self.assertIsNone(session._current_response_id)
+
+    def test_phone_session_recent_barge_in_keeps_short_final_confirmation(self) -> None:
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+        session._current_response_id = "utt_demo"
+        session._current_mark_name = "mark_utt_demo"
+        session._current_response_text = "Am I speaking with Mr Anthony Gressive?"
+        session._speech_seconds_since_flush = 0.35
+        session._handle_partial_transcript("yes", "en-IN")
+
+        session._handle_final_transcript("yes", "en-IN")
+        timer = session._turn_commit_timer
+        if timer is not None:
+            timer.cancel()
+
+        self.assertTrue(any(entry["role"] == "customer" and entry["text"] == "yes" for entry in session.transcript))
+
+    def test_phone_session_playback_fallback_finishes_turn_without_mark(self) -> None:
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+        session._current_tts_serial = 3
+        session._current_response_id = "utt_demo"
+        session._current_mark_name = "mark_utt_demo"
+        session._current_response_text = "Greeting"
+
+        completed = session._complete_active_playback(3, "mark_utt_demo", "timer_fallback")
+
+        self.assertTrue(completed)
+        self.assertIsNone(session._current_response_id)
+        self.assertEqual(session.turn_number, 1)
+
     def test_create_session_reuses_requested_cost_session_id(self) -> None:
         client = policy_app.app.test_client()
 

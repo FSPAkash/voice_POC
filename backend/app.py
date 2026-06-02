@@ -991,6 +991,21 @@ _SARVAM_FILLER_SINGLE_WORDS = {
 }
 
 
+_STT_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+_ECHO_OVERLAP_STOPWORDS = {
+    "this",
+    "that",
+    "from",
+    "with",
+    "speaking",
+    "hello",
+    "good",
+    "morning",
+    "afternoon",
+    "evening",
+}
+
+
 def is_stt_hallucination(text: str) -> bool:
     """Drop transcripts that look like Whisper/Saarika training-data filler
     rather than real customer speech. These show up when VAD flushes near-
@@ -1027,6 +1042,37 @@ def is_likely_stt_hallucination(text: str) -> bool:
     if lowered.strip() and lowered.strip() in vocab_lower:
         return True
     return False
+
+
+def stt_word_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    return _STT_TOKEN_RE.findall(normalize_whitespace(text).casefold())
+
+
+def looks_like_agent_echo(transcript_text: str, assistant_text: str) -> bool:
+    customer = normalize_whitespace(transcript_text).strip().casefold()
+    assistant = normalize_whitespace(assistant_text).strip().casefold()
+    if not customer or not assistant:
+        return False
+    if customer == assistant:
+        return True
+    if len(customer) >= 12 and customer in assistant:
+        return True
+    customer_tokens = stt_word_tokens(customer)
+    assistant_tokens = stt_word_tokens(assistant)
+    if len(customer_tokens) < 3 or len(assistant_tokens) < 3:
+        return False
+    informative_customer = [
+        token for token in customer_tokens if len(token) >= 4 and token not in _ECHO_OVERLAP_STOPWORDS
+    ]
+    informative_assistant = {
+        token for token in assistant_tokens if len(token) >= 4 and token not in _ECHO_OVERLAP_STOPWORDS
+    }
+    if len(informative_customer) < 3 or len(informative_assistant) < 3:
+        return False
+    shared = sum(1 for token in informative_customer if token in informative_assistant)
+    return shared >= 3 and (shared / max(len(informative_customer), 1)) >= 0.75
 
 
 def extract_json_payload(raw_text: str) -> dict[str, Any]:
@@ -5054,7 +5100,9 @@ class PhoneCallSession:
         self._turn_commit_buffer: list[str] = []
         self._current_response_id: str | None = None
         self._current_mark_name: str | None = None
+        self._current_response_text: str | None = None
         self._current_tts_serial = 0
+        self._playback_finish_timer: threading.Timer | None = None
         self._last_agent_speak_start_at: float | None = None
         self._pending_barge_in_at: float | None = None
         self._stt_upstream: Any | None = None
@@ -5141,6 +5189,33 @@ class PhoneCallSession:
                 }
             )
 
+    def _latest_assistant_text(self) -> str:
+        with self._lock:
+            for entry in reversed(self.transcript):
+                if entry.get("role") == "assistant":
+                    return str(entry.get("text") or "")
+        return ""
+
+    def _cancel_playback_finish_timer_locked(self) -> None:
+        timer = self._playback_finish_timer
+        self._playback_finish_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _complete_active_playback(self, serial: int, mark_name: str, source: str) -> bool:
+        with self._lock:
+            if serial != self._current_tts_serial or mark_name != self._current_mark_name:
+                return False
+            self._cancel_playback_finish_timer_locked()
+            self._current_response_id = None
+            self._current_mark_name = None
+            self._current_response_text = None
+            self._last_agent_speak_start_at = None
+            self.turn_number += 1
+        self.log_event("playback_completed", {"source": source})
+        threading.Thread(target=self._run_supervisor_review, daemon=True).start()
+        return True
+
     def _handle_language_detection(self, detected_code: str) -> None:
         mapped = language_id_for_sarvam_code(detected_code)
         if not mapped:
@@ -5179,9 +5254,11 @@ class PhoneCallSession:
         with self._lock:
             if not self._current_response_id and not self._current_mark_name:
                 return
+            self._cancel_playback_finish_timer_locked()
             self._current_tts_serial += 1
             self._current_response_id = None
             self._current_mark_name = None
+            self._current_response_text = None
             self._last_agent_speak_start_at = None
             self._pending_barge_in_at = time.time()
         self.log_event("playback_cleared", {"reason": reason})
@@ -5205,6 +5282,7 @@ class PhoneCallSession:
             mark_name = f"mark_{response_id}"
             self._current_response_id = response_id
             self._current_mark_name = mark_name
+            self._current_response_text = normalized
             self._last_agent_speak_start_at = time.time()
         self._append_transcript("assistant", normalized, entry_id=f"assistant_{response_id}")
         self.log_event("assistant_reply", {"utterance_id": response_id, "text": normalized})
@@ -5235,8 +5313,10 @@ class PhoneCallSession:
             self.log_event("tts_error", {"message": str(exc)[:200]})
             with self._lock:
                 if serial == self._current_tts_serial:
+                    self._cancel_playback_finish_timer_locked()
                     self._current_response_id = None
                     self._current_mark_name = None
+                    self._current_response_text = None
                     self._last_agent_speak_start_at = None
             return
 
@@ -5285,6 +5365,19 @@ class PhoneCallSession:
             )
         except Exception:
             pass
+        playback_seconds = len(pcm_bytes) / (2 * max(EXOTEL_STREAM_SAMPLE_RATE, 1))
+        fallback_timer = threading.Timer(
+            playback_seconds + 0.45,
+            self._complete_active_playback,
+            args=(serial, mark_name, "timer_fallback"),
+        )
+        fallback_timer.daemon = True
+        with self._lock:
+            if self._stop or serial != self._current_tts_serial or mark_name != self._current_mark_name:
+                return
+            self._cancel_playback_finish_timer_locked()
+            self._playback_finish_timer = fallback_timer
+        fallback_timer.start()
 
     def _close_stt_upstream(self, expected: Any | None = None, *, reset_billing: bool = False) -> None:
         with self._lock:
@@ -5470,7 +5563,16 @@ class PhoneCallSession:
         self._handle_language_detection(detected_code)
         with self._lock:
             active_response_id = self._current_response_id
+            active_response_text = self._current_response_text or self._latest_assistant_text()
+            speech_seconds = self._speech_seconds_since_flush
         if not active_response_id:
+            return
+        if looks_like_agent_echo(trimmed, active_response_text):
+            return
+        tokens = stt_word_tokens(trimmed)
+        if not tokens:
+            return
+        if len(tokens) < 2 and speech_seconds < 0.25:
             return
         self._cancel_active_playback("barge_in_partial")
 
@@ -5479,18 +5581,31 @@ class PhoneCallSession:
         if not trimmed:
             return
         self._handle_language_detection(detected_code)
+        tokens = stt_word_tokens(trimmed)
+        now = time.time()
         with self._lock:
-            recent_barge_in = self._pending_barge_in_at and (time.time() - self._pending_barge_in_at < 2.0)
+            recent_barge_in = self._pending_barge_in_at and (now - self._pending_barge_in_at < 2.0)
             last_speak_at = self._last_agent_speak_start_at
             active_response_id = self._current_response_id
+            active_response_text = self._current_response_text or self._latest_assistant_text()
             self._pending_barge_in_at = None
+        if active_response_id:
+            if looks_like_agent_echo(trimmed, active_response_text):
+                self.log_event("stt_dropped", {"reason": "agent_echo", "text": trimmed[:120]})
+                return
+            if not recent_barge_in and len(tokens) < 3:
+                self.log_event("stt_dropped", {"reason": "short_during_playback", "text": trimmed[:120]})
+                return
+            if not recent_barge_in:
+                self._cancel_active_playback("barge_in_final")
+        elif last_speak_at is not None and now - last_speak_at < 0.9 and len(tokens) <= 2:
+            return
         if (
-            not recent_barge_in
-            and last_speak_at is not None
-            and active_response_id
-            and time.time() - last_speak_at < 0.9
-            and len(trimmed.split()) <= 2
+            last_speak_at is not None
+            and now - last_speak_at < 2.0
+            and looks_like_agent_echo(trimmed, active_response_text)
         ):
+            self.log_event("stt_dropped", {"reason": "agent_echo_post_playback", "text": trimmed[:120]})
             return
         if is_stt_hallucination(trimmed):
             self._append_transcript("system", "Dropped transcript hallucination (STT echoed prompt on silence).")
@@ -5611,11 +5726,8 @@ class PhoneCallSession:
         with self._lock:
             if not name or name != self._current_mark_name:
                 return
-            self._current_response_id = None
-            self._current_mark_name = None
-            self._last_agent_speak_start_at = None
-            self.turn_number += 1
-        threading.Thread(target=self._run_supervisor_review, daemon=True).start()
+            serial = self._current_tts_serial
+        self._complete_active_playback(serial, name, "exotel_mark")
 
     def start_stream(self, stream_sid: str | None) -> None:
         with self._lock:
@@ -5647,6 +5759,7 @@ class PhoneCallSession:
             self.ended_at = utc_now()
             timer = self._turn_commit_timer
             self._turn_commit_timer = None
+            self._cancel_playback_finish_timer_locked()
         if timer is not None:
             timer.cancel()
         self._close_stt_upstream(reset_billing=True)
