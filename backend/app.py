@@ -4243,10 +4243,11 @@ def exotel_start_call():
             stream_url=stream_url,
             status_callback_url=status_callback_url,
         )
+        multipart_payload = {key: (None, value) for key, value in outbound_payload.items()}
         response = requests.post(
             f"{EXOTEL_API_BASE_URL}/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect",
             auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
-            data=outbound_payload,
+            files=multipart_payload,
             timeout=30,
         )
     except Exception as exc:  # noqa: BLE001
