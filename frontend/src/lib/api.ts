@@ -1,5 +1,6 @@
 import type {
   BootstrapResponse,
+  CallHistoryRecord,
   CostState,
   LanguageCoachResponse,
   SessionResponse,
@@ -30,6 +31,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchBootstrap() {
   return requestJson<BootstrapResponse>('/api/bootstrap')
+}
+
+export function fetchCallHistory() {
+  return requestJson<{ history: CallHistoryRecord[] }>('/api/call/history')
 }
 
 export function createRealtimeSession(body: {
@@ -185,12 +190,15 @@ export function customerTurn(body: {
 
 export function logCall(body: {
   account_number: string
+  mode?: 'voice' | 'chat'
   disposition: string
   transcript: TranscriptEntry[]
   tool_calls: ToolCallEntry[]
   duration_sec?: number
   cost_usd?: number
   total_units?: number
+  mode_cost_usd?: number
+  mode_tokens?: number
   costs?: CostState
   summary?: CallSummary
   notes?: string

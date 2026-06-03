@@ -15,6 +15,7 @@ import {
   detectCustomerLanguage,
   evaluateSupervisor,
   fetchBootstrap,
+  fetchCallHistory,
   fetchCosts,
   fetchSupervisorBoard,
   invokeTool,
@@ -47,6 +48,7 @@ function extractSpokenLine(event: Record<string, unknown>): string {
 }
 import type {
   BootstrapResponse,
+  CallHistoryRecord,
   CallDisposition,
   CostState,
   LanguageAdvice,
@@ -68,19 +70,7 @@ type PricingCard = {
   active?: boolean
 }
 
-type CallRecord = {
-  id: string
-  startedAt: number
-  endedAt: number
-  durationSec: number
-  mode: InteractionMode
-  disposition: CallDisposition
-  costUsd: number
-  totalTokens: number
-  modeCostUsd?: number
-  modeTokens?: number
-  summary: CallSummary | null
-}
+type CallRecord = CallHistoryRecord
 
 function formatInrRate(amount: number): string {
   return new Intl.NumberFormat('en-IN', {
@@ -675,6 +665,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
     setBoard(payload.board)
     costsRef.current = payload.costs
     setCosts(payload.costs)
+    setCallHistory(Array.isArray(payload.call_history) ? payload.call_history : [])
     const defaultLanguageId = payload.config.default_language_id ?? 'hinglish'
     const defaultRealtimeModel = payload.config.realtime_model ?? 'bulbul:v3'
     setSelectedLanguageId(defaultLanguageId)
@@ -720,11 +711,16 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
   const refreshRuntimeState = useEffectEvent(async () => {
     try {
-      const [nextCosts, nextBoard] = await Promise.all([fetchCosts(), fetchSupervisorBoard()])
+      const [nextCosts, nextBoard, nextHistory] = await Promise.all([
+        fetchCosts(),
+        fetchSupervisorBoard(),
+        fetchCallHistory(),
+      ])
       costsRef.current = nextCosts
       startTransition(() => {
         setCosts(nextCosts)
         setBoard(nextBoard)
+        setCallHistory(nextHistory.history)
       })
     } catch {
       // Background refresh is best-effort.
@@ -2040,14 +2036,25 @@ export default function App({ username, onLogout }: AppProps = {}) {
       try {
         const durationSec = Math.max(0, Math.round((endedAt - startedAt) / 1000))
         const loggedCosts = finalCosts ?? costsRef.current
+        const modeCostUsd =
+          mode === 'voice'
+            ? loggedCosts.agent.estimated_cost_usd
+            : loggedCosts.chat_agent?.estimated_cost_usd ?? 0
+        const modeTokens =
+          mode === 'voice'
+            ? loggedCosts.agent.total_tokens
+            : loggedCosts.chat_agent?.total_tokens ?? 0
         await logCall({
           account_number: bootstrapRef.current.account_number,
+          mode,
           disposition: dispositionRef.current,
           transcript: transcriptRef.current,
           tool_calls: toolCallsRef.current,
           duration_sec: durationSec,
           cost_usd: loggedCosts.combined.estimated_cost_usd,
           total_units: loggedCosts.combined.total_tokens,
+          mode_cost_usd: modeCostUsd,
+          mode_tokens: modeTokens,
           costs: loggedCosts,
           summary: summary ?? undefined,
         })

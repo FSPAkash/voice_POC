@@ -179,6 +179,34 @@ export type PricingReference = {
   }
 }
 
+export type CallHistoryRecord = {
+  id: string
+  startedAt: number
+  endedAt: number
+  durationSec: number
+  mode: 'voice' | 'chat'
+  disposition: string
+  costUsd: number
+  totalTokens: number
+  modeCostUsd?: number
+  modeTokens?: number
+  summary: {
+    headline?: string
+    customer_mood?: string
+    customer_sentiment_score?: number
+    agent_tone_assessment?: string
+    rapport_built?: boolean
+    agreements?: string[]
+    customer_requests?: string[]
+    agent_commitments?: string[]
+    follow_ups?: string[]
+    next_action?: string
+    key_decisions?: string[]
+    disposition?: string
+    risk_flags?: string[]
+  } | null
+}
+
 export type BootstrapResponse = {
   account_number: string
   customer: Customer
@@ -198,6 +226,7 @@ export type BootstrapResponse = {
   realtime_tools: RealtimeTool[]
   board: SupervisorBoardState
   costs: CostState
+  call_history?: CallHistoryRecord[]
   config: {
     realtime_model: string
     supported_realtime_models: RealtimeModelOption[]

@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from backend import app as policy_app
 
@@ -462,10 +464,46 @@ class PolicyEngineTests(unittest.TestCase):
 
         self.assertEqual(spoken, "Outstanding amount is INR 57,920.")
 
+    def test_load_call_history_serializes_backend_log_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_path = policy_app.CALL_LOG_FILE
+            policy_app.CALL_LOG_FILE = Path(tmpdir) / "call_log.jsonl"
+            try:
+                policy_app.append_jsonl(
+                    policy_app.CALL_LOG_FILE,
+                    {
+                        "id": "call_demo_1",
+                        "mode": "voice",
+                        "disposition": "Invoice resend requested",
+                        "duration_sec": 42,
+                        "cost_usd": 0.12,
+                        "total_units": 1234,
+                        "summary": {"headline": "Demo call"},
+                        "timestamp": "2026-06-03T05:08:20.603445+00:00",
+                        "costs": {
+                            "combined": {"estimated_cost_usd": 0.12, "total_tokens": 1234},
+                            "agent": {"estimated_cost_usd": 0.1, "total_tokens": 1000},
+                        },
+                    },
+                )
+                history = policy_app.load_call_history()
+            finally:
+                policy_app.CALL_LOG_FILE = original_path
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["id"], "call_demo_1")
+        self.assertEqual(history[0]["mode"], "voice")
+        self.assertEqual(history[0]["summary"]["headline"], "Demo call")
+        self.assertEqual(history[0]["durationSec"], 42)
+
     def test_localized_sarvam_voice_prefers_language_specific_speaker(self) -> None:
         self.assertEqual(policy_app.localized_sarvam_voice("ratan", "hi-IN"), "shubh")
         self.assertEqual(policy_app.localized_sarvam_voice("priya", "bn-IN"), "roopa")
         self.assertEqual(policy_app.localized_sarvam_voice("ratan", "en-IN"), "aditya")
+
+    def test_sarvam_tts_pace_uses_english_override(self) -> None:
+        self.assertEqual(policy_app.sarvam_tts_pace("en-IN", "shubh"), policy_app.SARVAM_TTS_PACE_ENGLISH)
+        self.assertEqual(policy_app.sarvam_tts_pace("hi-IN", "shubh"), policy_app.SARVAM_TTS_PACE)
 
     def test_scrub_forbidden_payment_methods_preserves_cash_flow_language(self) -> None:
         cleaned = policy_app.scrub_forbidden_payment_methods(

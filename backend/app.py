@@ -140,6 +140,7 @@ SARVAM_STT_SAMPLE_RATE = _env_int("SARVAM_STT_SAMPLE_RATE", 16000, minimum=8000,
 # Bulbul sounds more natural for collections when nudged a touch faster and
 # less over-controlled. Keep these overridable from env for quick A/B testing.
 SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.08, minimum=0.5, maximum=2.0)
+SARVAM_TTS_PACE_ENGLISH = _env_float("SARVAM_TTS_PACE_ENGLISH", 1.16, minimum=0.5, maximum=2.0)
 SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.68, minimum=0.01, maximum=1.0)
 SARVAM_TTS_MIN_BUFFER_SIZE = _env_int("SARVAM_TTS_MIN_BUFFER_SIZE", 30, minimum=30, maximum=200)
 SARVAM_TTS_MAX_CHUNK_LENGTH = _env_int("SARVAM_TTS_MAX_CHUNK_LENGTH", 200, minimum=30, maximum=400)
@@ -258,6 +259,14 @@ def localized_sarvam_voice(voice: str | None, language_code: str | None) -> str:
     return mapping.get((language_code or "").strip(), requested)
 
 
+def sarvam_tts_pace(language_code: str | None, voice: str | None) -> float:
+    normalized_language = (language_code or "").strip().lower()
+    localized_voice = localized_sarvam_voice(voice, language_code)
+    if normalized_language == "en-in" or localized_voice == "aditya":
+        return SARVAM_TTS_PACE_ENGLISH
+    return SARVAM_TTS_PACE
+
+
 # App language_id -> Sarvam BCP-47 code.
 SARVAM_LANGUAGE_CODES: dict[str, str] = {
     "english": "en-IN",
@@ -293,7 +302,7 @@ def sarvam_tts_options(language_code: str, voice: str) -> dict[str, Any]:
         "speaker": localized_voice,
         "model": SARVAM_TTS_MODEL,
         "speech_sample_rate": SARVAM_TTS_SAMPLE_RATE,
-        "pace": SARVAM_TTS_PACE,
+        "pace": sarvam_tts_pace(language_code, voice),
         "temperature": SARVAM_TTS_TEMPERATURE,
     }
     if SARVAM_TTS_DICT_ID:
@@ -334,6 +343,70 @@ def determine_disposition(tool_name: str) -> str | None:
         "update_contact": "Alternate contact captured",
         "transfer_to_human": "Transferred to human",
     }.get(str(tool_name or "").strip())
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def serialize_call_history_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    duration_sec = max(0, int(entry.get("duration_sec", 0) or 0))
+    ended_at = parse_iso_datetime(entry.get("timestamp")) or utc_now()
+    ended_at_ms = int(ended_at.timestamp() * 1000)
+    started_at_ms = max(0, ended_at_ms - (duration_sec * 1000))
+    costs = entry.get("costs") if isinstance(entry.get("costs"), dict) else {}
+    mode = str(entry.get("mode") or "voice").strip().lower()
+    if mode not in {"voice", "chat"}:
+        mode = "voice"
+
+    mode_cost_usd = entry.get("mode_cost_usd")
+    mode_tokens = entry.get("mode_tokens")
+    if mode == "chat":
+        chat_costs = costs.get("chat_agent") if isinstance(costs.get("chat_agent"), dict) else {}
+        if mode_cost_usd is None:
+            mode_cost_usd = float(chat_costs.get("estimated_cost_usd", 0.0) or 0.0)
+        if mode_tokens is None:
+            mode_tokens = int(chat_costs.get("total_tokens", 0) or 0)
+    else:
+        agent_costs = costs.get("agent") if isinstance(costs.get("agent"), dict) else {}
+        if mode_cost_usd is None:
+            mode_cost_usd = float(agent_costs.get("estimated_cost_usd", 0.0) or 0.0)
+        if mode_tokens is None:
+            mode_tokens = int(agent_costs.get("total_tokens", 0) or 0)
+
+    combined = costs.get("combined") if isinstance(costs.get("combined"), dict) else {}
+    return {
+        "id": str(entry.get("id") or f"call_{uuid.uuid4().hex[:10]}"),
+        "startedAt": started_at_ms,
+        "endedAt": ended_at_ms,
+        "durationSec": duration_sec,
+        "mode": mode,
+        "disposition": str(entry.get("disposition") or "Call ended"),
+        "costUsd": float(entry.get("cost_usd", combined.get("estimated_cost_usd", 0.0)) or 0.0),
+        "totalTokens": int(entry.get("total_units", combined.get("total_tokens", 0)) or 0),
+        "modeCostUsd": float(mode_cost_usd or 0.0),
+        "modeTokens": int(mode_tokens or 0),
+        "summary": entry.get("summary") if isinstance(entry.get("summary"), dict) else None,
+    }
+
+
+def load_call_history(limit: int = 50) -> list[dict[str, Any]]:
+    entries = read_jsonl(CALL_LOG_FILE)
+    if not entries:
+        return []
+    ordered = [serialize_call_history_entry(entry) for entry in reversed(entries[-limit:])]
+    return ordered
 
 
 def sanitize_phone_number(value: str, *, keep_plus: bool = True) -> str:
@@ -688,6 +761,26 @@ def write_json(path: Path, data: Any) -> None:
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                entries.append(parsed)
+    except OSError:
+        return []
+    return entries
 
 
 def read_prompt(path: Path) -> str:
@@ -4330,6 +4423,7 @@ def bootstrap():
         "realtime_tools": REALTIME_TOOLS,
         "board": load_board(),
         "costs": ledger_with_combined(load_ledger()),
+        "call_history": load_call_history(),
         "config": {
             "tts_provider": "sarvam",
             "stt_provider": "sarvam",
@@ -4371,7 +4465,7 @@ def bootstrap():
             "sarvam_voice_preset": {
                 "id": f"{default_voice}-collections",
                 "speaker": default_voice,
-                "pace": SARVAM_TTS_PACE,
+                "pace": sarvam_tts_pace(sarvam_language_code(DEFAULT_LANGUAGE_ID), default_voice),
                 "temperature": SARVAM_TTS_TEMPERATURE,
                 "sample_rate": SARVAM_TTS_SAMPLE_RATE,
                 "codec": SARVAM_TTS_OUTPUT_CODEC,
@@ -5699,7 +5793,7 @@ class PhoneCallSession:
             self.turn_number += 1
         self.log_event("playback_completed", {"source": source})
         self._start_ambience_loop()
-        threading.Thread(target=self._emit_idle_ambience_once, daemon=True).start()
+        self._emit_idle_ambience_once()
         threading.Thread(target=self._run_supervisor_review, daemon=True).start()
         return True
 
@@ -6403,12 +6497,23 @@ class PhoneCallSession:
                 entry = {
                     "id": f"call_{uuid.uuid4().hex[:10]}",
                     "account_number": log_payload["account_number"],
+                    "mode": "voice",
                     "disposition": log_payload["disposition"],
                     "transcript": log_payload["transcript"],
                     "tool_calls": log_payload["tool_calls"],
                     "duration_sec": log_payload["duration_sec"],
                     "cost_usd": log_payload["cost_usd"],
                     "total_units": log_payload["total_units"],
+                    "mode_cost_usd": (
+                        float(log_payload["costs"].get("agent", {}).get("estimated_cost_usd", 0.0))
+                        if isinstance(log_payload.get("costs"), dict)
+                        else 0.0
+                    ),
+                    "mode_tokens": (
+                        int(log_payload["costs"].get("agent", {}).get("total_tokens", 0))
+                        if isinstance(log_payload.get("costs"), dict)
+                        else 0
+                    ),
                     "costs": log_payload["costs"],
                     "summary": log_payload["summary"],
                     "notes": log_payload["notes"],
@@ -6478,15 +6583,21 @@ def tool_route(tool_name: str):
 @app.post("/api/call/log")
 def call_log():
     payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode") or "voice").strip().lower()
+    if mode not in {"voice", "chat"}:
+        mode = "voice"
     entry = {
         "id": f"call_{uuid.uuid4().hex[:10]}",
         "account_number": payload.get("account_number", DEFAULT_ACCOUNT_ID),
+        "mode": mode,
         "disposition": payload.get("disposition"),
         "transcript": payload.get("transcript", []),
         "tool_calls": payload.get("tool_calls", []),
         "duration_sec": int(payload.get("duration_sec", 0) or 0),
         "cost_usd": float(payload.get("cost_usd", 0.0) or 0.0),
         "total_units": int(payload.get("total_units", 0) or 0),
+        "mode_cost_usd": float(payload.get("mode_cost_usd", 0.0) or 0.0),
+        "mode_tokens": int(payload.get("mode_tokens", 0) or 0),
         "costs": payload.get("costs") or {},
         "summary": payload.get("summary") or {},
         "notes": payload.get("notes", ""),
@@ -6494,6 +6605,11 @@ def call_log():
     }
     append_jsonl(CALL_LOG_FILE, entry)
     return success_json({"ok": True, "entry_id": entry["id"]})
+
+
+@app.get("/api/call/history")
+def call_history():
+    return success_json({"history": load_call_history()})
 
 
 @app.post("/api/chat/turn")
