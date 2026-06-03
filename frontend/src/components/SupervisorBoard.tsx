@@ -10,6 +10,7 @@ type SupervisorBoardProps = {
     issueId: string,
     status: 'new' | 'reviewing' | 'accepted' | 'dismissed',
   ) => Promise<void>
+  hideCosts?: boolean
 }
 
 type StatusId = 'new' | 'reviewing' | 'accepted' | 'dismissed'
@@ -36,7 +37,7 @@ function severityTone(severity: string): 'danger' | 'warn' | 'neutral' {
   return 'neutral'
 }
 
-export function SupervisorBoard({ board, costs, onMoveIssue }: SupervisorBoardProps) {
+export function SupervisorBoard({ board, costs, onMoveIssue, hideCosts }: SupervisorBoardProps) {
   const [filter, setFilter] = useState<FilterId>('all')
 
   const allIssues = useMemo<(SupervisorIssue & { status: StatusId })[]>(
@@ -78,8 +79,9 @@ export function SupervisorBoard({ board, costs, onMoveIssue }: SupervisorBoardPr
           <div className="sup-eyebrow">Supervisor agent</div>
           <h2>Findings &amp; QA</h2>
           <p>
-            Backend reviewer running <code>{supervisorCost.model}</code>. Advisory only — never blocks the
-            live caller.
+            {hideCosts
+              ? 'Backend reviewer. Advisory only — never blocks the live caller.'
+              : <>Backend reviewer running <code>{supervisorCost.model}</code>. Advisory only — never blocks the live caller.</>}
           </p>
         </div>
         <div className="sup-stats">
@@ -91,14 +93,18 @@ export function SupervisorBoard({ board, costs, onMoveIssue }: SupervisorBoardPr
             <span>Reviews</span>
             <strong>{supervisorCost.events}</strong>
           </div>
-          <div className="sup-stat">
-            <span>Supervisor $</span>
-            <strong>${supervisorCost.estimated_cost_usd.toFixed(4)}</strong>
-          </div>
-          <div className="sup-stat">
-            <span>+ Lang coach $</span>
-            <strong>${langCost.estimated_cost_usd.toFixed(4)}</strong>
-          </div>
+          {hideCosts ? null : (
+            <>
+              <div className="sup-stat">
+                <span>Supervisor $</span>
+                <strong>${supervisorCost.estimated_cost_usd.toFixed(4)}</strong>
+              </div>
+              <div className="sup-stat">
+                <span>+ Lang coach $</span>
+                <strong>${langCost.estimated_cost_usd.toFixed(4)}</strong>
+              </div>
+            </>
+          )}
         </div>
       </div>
 

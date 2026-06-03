@@ -24,6 +24,7 @@ import {
   recordCostEvent,
   resetCostLedger,
   resetDemo,
+  startExotelCall,
   summarizeCall,
   type CallSummary,
 } from './lib/api'
@@ -61,7 +62,13 @@ import type {
 
 type CallState = 'loading' | 'ready' | 'starting' | 'connected' | 'ending' | 'error'
 type TabId = 'call' | 'wrap' | 'supervisor'
-type InteractionMode = 'voice' | 'chat'
+
+const MOBILE_CONTACTS: { name: string; number: string }[] = [
+  { name: 'Akash', number: '+919136152622' },
+  { name: 'Sanjay', number: '+919930089520' },
+  { name: 'Anirudh', number: '+918939928854' },
+]
+type InteractionMode = 'voice' | 'chat' | 'mobile'
 type PricingCard = {
   id: string
   title: string
@@ -351,6 +358,10 @@ type AppProps = {
 }
 
 export default function App({ username, onLogout }: AppProps = {}) {
+  const isClient = (username ?? '').trim().toLowerCase() === 'client'
+  const [mobileNumber, setMobileNumber] = useState<string>(MOBILE_CONTACTS[0].number)
+  const [mobileBusy, setMobileBusy] = useState(false)
+  const [mobileStatus, setMobileStatus] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null)
   const [costs, setCosts] = useState<CostState>(emptyCosts)
   const [board, setBoard] = useState<SupervisorBoardState>(emptyBoard)
@@ -2046,7 +2057,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
             : loggedCosts.chat_agent?.total_tokens ?? 0
         await logCall({
           account_number: bootstrapRef.current.account_number,
-          mode,
+          mode: mode === 'mobile' ? 'voice' : mode,
           disposition: dispositionRef.current,
           transcript: transcriptRef.current,
           tool_calls: toolCallsRef.current,
@@ -2085,7 +2096,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         startedAt,
         endedAt,
         durationSec: Math.max(0, Math.round((endedAt - startedAt) / 1000)),
-        mode,
+        mode: mode === 'mobile' ? 'voice' : mode,
         disposition: dispositionRef.current,
         costUsd: snap.combined.estimated_cost_usd,
         totalTokens: snap.combined.total_tokens,
@@ -2405,8 +2416,18 @@ export default function App({ username, onLogout }: AppProps = {}) {
                 >
                   Chat
                 </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === 'mobile'}
+                  className={mode === 'mobile' ? 'mode-switch__btn mode-switch__btn--on' : 'mode-switch__btn'}
+                  onClick={() => setMode('mobile')}
+                  disabled={isLive || chatBusy}
+                >
+                  Mobile
+                </button>
               </div>
-              {mode === 'voice' ? (
+              {mode === 'voice' && !isClient ? (
                 <label className="stage__model">
                   <span>Model</span>
                   <select
@@ -2447,7 +2468,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                 </label>
               ) : null}
               <div className="stage__toolbar-spacer" />
-              {mode === 'voice' ? (
+              {mode === 'mobile' ? null : mode === 'voice' ? (
                 <>
                   <button
                     className="btn btn--primary"
@@ -2622,7 +2643,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   <StatusPill tone="neutral">{disposition}</StatusPill>
                 </div>
               </div>
-            ) : (
+            ) : mode === 'chat' ? (
               <div className="stage__hero stage__hero--compact stage__hero--neutral stage__hero--chat">
                 <div className="stage__line">
                   {chatBusy
@@ -2639,9 +2660,78 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   <StatusPill tone="neutral">{disposition}</StatusPill>
                 </div>
               </div>
+            ) : (
+              <div className="dialer">
+                <div className="dialer__card">
+                  <div className="dialer__brand">
+                    <img src="/logos/FS.png" alt="FS" />
+                  </div>
+                  <div className="dialer__title">
+                    {MOBILE_CONTACTS.find((c) => c.number === mobileNumber)?.name ?? 'Contact'}
+                  </div>
+                  <div className="dialer__number">{mobileNumber}</div>
+
+                  <div className="dialer__contacts">
+                    {MOBILE_CONTACTS.map((c) => {
+                      const on = c.number === mobileNumber
+                      return (
+                        <button
+                          key={c.number}
+                          type="button"
+                          className={`dialer__contact${on ? ' dialer__contact--on' : ''}`}
+                          onClick={() => setMobileNumber(c.number)}
+                          disabled={mobileBusy}
+                        >
+                          <span className="dialer__contact-avatar">{c.name.charAt(0)}</span>
+                          <span className="dialer__contact-name">{c.name}</span>
+                          <span className="dialer__contact-num">{c.number}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <button
+                    type="button"
+                    className={`dialer__call${mobileBusy ? ' dialer__call--busy' : ''}`}
+                    disabled={mobileBusy}
+                    aria-label="Start call"
+                    onClick={async () => {
+                      setMobileBusy(true)
+                      setMobileStatus(null)
+                      try {
+                        await startExotelCall({
+                          to_number: mobileNumber,
+                          language_id: 'hinglish',
+                          voice: 'shubh',
+                        })
+                        setMobileStatus({ tone: 'ok', text: `Call placed to ${mobileNumber}` })
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : 'Call failed.'
+                        setMobileStatus({ tone: 'err', text: msg })
+                      } finally {
+                        setMobileBusy(false)
+                      }
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden focusable="false">
+                      <path
+                        fill="currentColor"
+                        d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.5.6 3.8.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.6.6 3.8.1.4 0 .7-.2 1l-2.3 2z"
+                      />
+                    </svg>
+                    <span>{mobileBusy ? 'Dialing…' : 'Call'}</span>
+                  </button>
+
+                  {mobileStatus ? (
+                    <div className={`dialer__status dialer__status--${mobileStatus.tone}`} role="status">
+                      {mobileStatus.text}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
             )}
 
-            {mode === 'voice' && headless ? null : (
+            {(mode === 'voice' && headless) || mode === 'mobile' ? null : (
             <div className="transcript" ref={transcriptScrollRef}>
               {deferredTranscript.length === 0 ? (
                 <div className="transcript__empty">
@@ -2727,6 +2817,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
           </section>
 
           <aside className="side">
+            {isClient ? null : (
             <div className="cost-strip cost-strip--side">
               {mode === 'voice' ? (
                 <>
@@ -2770,7 +2861,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   </div>
                 </div>
                 </>
-              ) : (
+              ) : mode === 'chat' ? (
                 <div className="cost-block">
                   <div className="cost-block__head">
                     <span>Chat Agent (text)</span>
@@ -2786,8 +2877,9 @@ export default function App({ username, onLogout }: AppProps = {}) {
                     <span>· out {formatNumber(costs.chat_agent?.text_output_tokens ?? 0)}</span>
                   </div>
                 </div>
-              )}
+              ) : null}
             </div>
+            )}
             <div className="card agents-card">
               <div className="card__head">
                 <span className="card__eyebrow">Agent Stack</span>
@@ -2806,9 +2898,11 @@ export default function App({ username, onLogout }: AppProps = {}) {
                     >
                       <div className="agent-node__row">
                         <span className="agent-node__name">{node.label}</span>
-                        <span className="agent-node__model">
-                          {node.id === 'caller' ? selectedRealtimeModel : node.model}
-                        </span>
+                        {isClient ? null : (
+                          <span className="agent-node__model">
+                            {node.id === 'caller' ? selectedRealtimeModel : node.model}
+                          </span>
+                        )}
                       </div>
                       <div className="agent-node__sub">{last?.summary ?? node.idle}</div>
                     </div>
@@ -2907,20 +3001,22 @@ export default function App({ username, onLogout }: AppProps = {}) {
                       ))}
                     </select>
                   </label>
-                  <label className="field">
-                    <span>Voice model</span>
-                    <select
-                      value={selectedRealtimeModel}
-                      onChange={(event) => setSelectedRealtimeModel(event.target.value)}
-                      disabled={isLive || callState === 'starting' || chatBusy}
-                    >
-                      {supportedRealtimeModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  {isClient ? null : (
+                    <label className="field">
+                      <span>Voice model</span>
+                      <select
+                        value={selectedRealtimeModel}
+                        onChange={(event) => setSelectedRealtimeModel(event.target.value)}
+                        disabled={isLive || callState === 'starting' || chatBusy}
+                      >
+                        {supportedRealtimeModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <div className="coach-grid">
                     <div>
                       <span>Live reply</span>
@@ -2940,7 +3036,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                     </div>
                   </div>
                   <div className="pricing-stack">
-                    {sarvamPricingCards.length > 0 ? (
+                    {isClient ? null : sarvamPricingCards.length > 0 ? (
                       <div className="pricing-section">
                         <div className="pricing-section__head">
                           <span className="card__eyebrow">Sarvam Speech Pricing</span>
@@ -2967,7 +3063,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                         {sarvamPricingNote ? <div className="pricing-note">{sarvamPricingNote}</div> : null}
                       </div>
                     ) : null}
-                    {usdPricingCards.length > 0 ? (
+                    {isClient ? null : usdPricingCards.length > 0 ? (
                       <div className="pricing-section">
                         <div className="pricing-section__head">
                           <span className="card__eyebrow">Policy Stack Pricing</span>
@@ -3032,8 +3128,9 @@ export default function App({ username, onLogout }: AppProps = {}) {
                     <div className="summary-block summary-block--metrics">
                       <span>This call</span>
                       <p>
-                        {formatUsd(costs.combined.estimated_cost_usd)} ·{' '}
-                        {formatElapsed(elapsed)} · {formatNumber(costs.combined.total_tokens)} units
+                        {isClient
+                          ? formatElapsed(elapsed)
+                          : `${formatUsd(costs.combined.estimated_cost_usd)} · ${formatElapsed(elapsed)} · ${formatNumber(costs.combined.total_tokens)} units`}
                       </p>
                     </div>
                     {callSummary.agent_tone_assessment ? (
@@ -3129,15 +3226,15 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
         </main>
       ) : activeTab === 'wrap' ? (
-        <WrapUpView history={callHistory} />
+        <WrapUpView history={callHistory} hideCosts={isClient} />
       ) : (
-        <SupervisorBoard board={board} costs={costs} onMoveIssue={handleMoveIssue} />
+        <SupervisorBoard board={board} costs={costs} onMoveIssue={handleMoveIssue} hideCosts={isClient} />
       )}
     </div>
   )
 }
 
-function WrapUpView({ history }: { history: CallRecord[] }) {
+function WrapUpView({ history, hideCosts }: { history: CallRecord[]; hideCosts?: boolean }) {
   const totalCalls = history.length
   const totalSec = history.reduce((sum, r) => sum + r.durationSec, 0)
   const totalCost = history.reduce((sum, r) => sum + r.costUsd, 0)
@@ -3154,14 +3251,18 @@ function WrapUpView({ history }: { history: CallRecord[] }) {
           <span>Total time</span>
           <strong>{formatElapsed(totalSec)}</strong>
         </div>
-        <div className="wrap-stat">
-          <span>Total cost</span>
-          <strong>{formatUsd(totalCost)}</strong>
-        </div>
-        <div className="wrap-stat">
-          <span>Total units</span>
-          <strong>{formatNumber(totalTokens)}</strong>
-        </div>
+        {hideCosts ? null : (
+          <>
+            <div className="wrap-stat">
+              <span>Total cost</span>
+              <strong>{formatUsd(totalCost)}</strong>
+            </div>
+            <div className="wrap-stat">
+              <span>Total units</span>
+              <strong>{formatNumber(totalTokens)}</strong>
+            </div>
+          </>
+        )}
       </header>
 
       {totalCalls === 0 ? (
@@ -3186,8 +3287,8 @@ function WrapUpView({ history }: { history: CallRecord[] }) {
                 </div>
                 <div className="wrap-card__metrics">
                   <span>{formatElapsed(rec.durationSec)}</span>
-                  <strong>{formatUsd(rec.costUsd)}</strong>
-                  <span>{formatNumber(rec.totalTokens)} units</span>
+                  {hideCosts ? null : <strong>{formatUsd(rec.costUsd)}</strong>}
+                  {hideCosts ? null : <span>{formatNumber(rec.totalTokens)} units</span>}
                 </div>
               </div>
               {rec.summary ? (

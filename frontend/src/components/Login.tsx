@@ -3,6 +3,7 @@ import { useState, type FormEvent } from 'react'
 const CREDENTIALS: Record<string, string> = {
   Akash: 'a1234',
   demo: 'fs1234',
+  client: 'c1234',
 }
 
 const STORAGE_KEY = 'dhl_auth_user_v1'

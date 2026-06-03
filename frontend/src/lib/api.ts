@@ -33,6 +33,17 @@ export function fetchBootstrap() {
   return requestJson<BootstrapResponse>('/api/bootstrap')
 }
 
+export function startExotelCall(body: {
+  to_number: string
+  language_id?: string
+  voice?: string
+}) {
+  return requestJson<Record<string, unknown>>('/api/exotel/calls/start', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 export function fetchCallHistory() {
   return requestJson<{ history: CallHistoryRecord[] }>('/api/call/history')
 }
