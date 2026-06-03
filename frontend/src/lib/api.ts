@@ -38,10 +38,26 @@ export function startExotelCall(body: {
   language_id?: string
   voice?: string
 }) {
-  return requestJson<Record<string, unknown>>('/api/exotel/calls/start', {
+  return requestJson<{ session?: { session_id?: string } }>('/api/exotel/calls/start', {
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+export type ExotelCallSnapshot = {
+  session_id: string
+  status: string
+  active: boolean
+  target_number?: string
+  started_at?: string | null
+  ended_at?: string | null
+  disposition?: string
+}
+
+export function fetchExotelActiveCall() {
+  return requestJson<{ active_call: ExotelCallSnapshot | null; last_call: ExotelCallSnapshot | null }>(
+    '/api/exotel/calls/active',
+  )
 }
 
 export function fetchCallHistory() {

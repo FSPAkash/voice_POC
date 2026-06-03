@@ -25,6 +25,7 @@ import {
   resetCostLedger,
   resetDemo,
   startExotelCall,
+  fetchExotelActiveCall,
   summarizeCall,
   type CallSummary,
 } from './lib/api'
@@ -362,6 +363,8 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const [mobileNumber, setMobileNumber] = useState<string>(MOBILE_CONTACTS[0].number)
   const [mobileBusy, setMobileBusy] = useState(false)
   const [mobileStatus, setMobileStatus] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
+  const [mobilePhase, setMobilePhase] = useState<'idle' | 'placed' | 'ringing' | 'answered' | 'ended' | 'failed'>('idle')
+  const [mobileSessionId, setMobileSessionId] = useState<string | null>(null)
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null)
   const [costs, setCosts] = useState<CostState>(emptyCosts)
   const [board, setBoard] = useState<SupervisorBoardState>(emptyBoard)
@@ -746,6 +749,50 @@ export default function App({ username, onLogout }: AppProps = {}) {
     return () => window.clearInterval(intervalId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [callState])
+
+  useEffect(() => {
+    if (mobilePhase === 'idle' || mobilePhase === 'ended' || mobilePhase === 'failed') return undefined
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const data = await fetchExotelActiveCall()
+        if (cancelled) return
+        const snap = data.active_call ?? data.last_call
+        if (!snap) return
+        if (mobileSessionId && snap.session_id !== mobileSessionId) return
+        const status = (snap.status || '').toLowerCase()
+        if (status === 'connected' || status === 'in-progress' || status === 'answered') {
+          setMobilePhase('answered')
+          setMobileStatus({ tone: 'ok', text: 'Call answered' })
+        } else if (status === 'dialing' || status === 'ringing' || status === 'queued') {
+          setMobilePhase('ringing')
+          setMobileStatus({ tone: 'ok', text: 'Ringing…' })
+        } else if (
+          status === 'completed' ||
+          status === 'ended' ||
+          status === 'no-answer' ||
+          status === 'busy' ||
+          status === 'failed' ||
+          status === 'canceled' ||
+          status === 'cancelled'
+        ) {
+          setMobilePhase('ended')
+          setMobileStatus({
+            tone: status === 'completed' || status === 'ended' ? 'ok' : 'err',
+            text: `Call ended (${status})`,
+          })
+        }
+      } catch {
+        // ignore poll error
+      }
+    }
+    void tick()
+    const id = window.setInterval(() => void tick(), 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [mobilePhase, mobileSessionId])
 
   useEffect(() => {
     const snapshot = bootstrapRef.current
@@ -2692,21 +2739,27 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
                   <button
                     type="button"
-                    className={`dialer__call${mobileBusy ? ' dialer__call--busy' : ''}`}
-                    disabled={mobileBusy}
+                    className={`dialer__call${mobileBusy || mobilePhase === 'ringing' || mobilePhase === 'answered' ? ' dialer__call--busy' : ''}`}
+                    disabled={mobileBusy || mobilePhase === 'ringing' || mobilePhase === 'answered'}
                     aria-label="Start call"
                     onClick={async () => {
                       setMobileBusy(true)
-                      setMobileStatus(null)
+                      setMobilePhase('placed')
+                      setMobileSessionId(null)
+                      setMobileStatus({ tone: 'ok', text: `Calling ${mobileNumber}…` })
                       try {
-                        await startExotelCall({
+                        const resp = await startExotelCall({
                           to_number: mobileNumber,
                           language_id: 'hinglish',
                           voice: 'shubh',
                         })
-                        setMobileStatus({ tone: 'ok', text: `Call placed to ${mobileNumber}` })
+                        const sid = resp?.session?.session_id ?? null
+                        setMobileSessionId(sid)
+                        setMobilePhase('ringing')
+                        setMobileStatus({ tone: 'ok', text: 'Ringing…' })
                       } catch (err) {
                         const msg = err instanceof Error ? err.message : 'Call failed.'
+                        setMobilePhase('failed')
                         setMobileStatus({ tone: 'err', text: msg })
                       } finally {
                         setMobileBusy(false)
@@ -2719,7 +2772,15 @@ export default function App({ username, onLogout }: AppProps = {}) {
                         d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.5.6 3.8.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.6.6 3.8.1.4 0 .7-.2 1l-2.3 2z"
                       />
                     </svg>
-                    <span>{mobileBusy ? 'Dialing…' : 'Call'}</span>
+                    <span>
+                      {mobilePhase === 'ringing'
+                        ? 'Ringing…'
+                        : mobilePhase === 'answered'
+                          ? 'In call'
+                          : mobileBusy
+                            ? 'Dialing…'
+                            : 'Call'}
+                    </span>
                   </button>
 
                   {mobileStatus ? (
