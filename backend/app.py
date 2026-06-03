@@ -167,8 +167,10 @@ PHONE_STT_SILENCE_FLUSH_SECONDS = _env_float("PHONE_STT_SILENCE_FLUSH_SECONDS", 
 PHONE_TURN_COMMIT_DELAY_SECONDS = _env_float("PHONE_TURN_COMMIT_DELAY_SECONDS", 0.1, minimum=0.0, maximum=1.0)
 PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS = _env_float("PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS", 0.38, minimum=0.0, maximum=1.0)
 PHONE_AMBIENCE_ENABLED = _env_flag("PHONE_AMBIENCE_ENABLED", True)
-PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 3.8, minimum=0.0, maximum=6.0)
-PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 1.1, minimum=0.0, maximum=6.0)
+PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 1.0, minimum=0.0, maximum=4.0)
+PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.45, minimum=0.0, maximum=4.0)
+PHONE_AMBIENCE_TARGET_RMS = _env_float("PHONE_AMBIENCE_TARGET_RMS", 1400.0, minimum=200.0, maximum=6000.0)
+PHONE_AMBIENCE_MAX_NORMALIZE_GAIN = _env_float("PHONE_AMBIENCE_MAX_NORMALIZE_GAIN", 4.0, minimum=1.0, maximum=12.0)
 PHONE_AMBIENCE_FILE = BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav"
 PHONE_GREETING_BARGE_IN_GRACE_SECONDS = _env_float("PHONE_GREETING_BARGE_IN_GRACE_SECONDS", 1.6, minimum=0.0, maximum=5.0)
 
@@ -1965,6 +1967,47 @@ def ensure_invoice_tool(tool_calls: list[dict[str, Any]], account_number: str) -
     args = {"account_number": account_number}
     result = run_tool("get_invoices", args)
     return [build_tool_call_entry("get_invoices", args, result)]
+
+
+FAST_DETERMINISTIC_SIGNAL_NAMES = {
+    "why_calling",
+    "resolved_issues",
+    "one_at_a_time",
+    "count_invoices",
+    "which_invoice",
+    "amount_query",
+    "details",
+    "repeat_request",
+    "asks_timeline",
+    "will_pay",
+    "already_paid",
+    "dispute",
+    "wrong_contact",
+    "identity_confusion",
+    "cash_flow",
+    "approval_pending",
+    "discount",
+    "human_request",
+    "refusal",
+}
+
+
+def should_use_fast_deterministic_turn(messages: list[dict[str, Any]]) -> bool:
+    entries = transcript_entries_from_messages(messages)
+    latest_customer = last_entry(entries, "customer")
+    if not latest_customer:
+        return False
+
+    customer_text = latest_customer["text"]
+    signals = analyze_customer_turn(customer_text)
+    assistant_turns = count_entries(entries, "assistant")
+    raw_date, _ = parse_customer_date(customer_text)
+
+    if assistant_turns <= 1:
+        return True
+    if raw_date:
+        return True
+    return any(signals.get(name) for name in FAST_DETERMINISTIC_SIGNAL_NAMES)
 
 
 def generate_collections_reply(
@@ -4055,6 +4098,15 @@ def run_chat_agent_turn(
     language_advice: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[Any], str | None]:
     del coaching_hints
+    if POLICY_ENGINE_MODE == "llm" and should_use_fast_deterministic_turn(messages):
+        text, tools_log, _ = generate_collections_reply(
+            messages=messages,
+            account_number=account_number,
+            voice=voice,
+            language_advice=language_advice,
+        )
+        if text:
+            return text, tools_log, [], None
     if POLICY_ENGINE_MODE != "llm":
         text, tools_log, model = generate_collections_reply(
             messages=messages,
@@ -5204,6 +5256,38 @@ def apply_pcm16_gain(pcm_bytes: bytes, gain: float) -> bytes:
     return bytes(output)
 
 
+@lru_cache(maxsize=4)
+def load_phone_ambience_profile(sample_rate: int) -> tuple[bytes, int]:
+    pcm = load_phone_ambience_pcm(sample_rate)
+    if not pcm:
+        return b"", 0
+
+    window_bytes = max(int(sample_rate * 2 * 0.5), 320)
+    step_bytes = max(window_bytes // 2, 2)
+    scan_limit = min(len(pcm), max(window_bytes * 16, window_bytes))
+    best_offset = 0
+    best_rms = 0.0
+
+    upper_bound = max(scan_limit - window_bytes, 0)
+    for offset in range(0, upper_bound + 1, step_bytes):
+        segment = pcm[offset : offset + window_bytes]
+        if not segment:
+            continue
+        rms = pcm16_rms(segment)
+        if rms > best_rms:
+            best_rms = rms
+            best_offset = offset
+
+    reference_rms = best_rms or pcm16_rms(pcm)
+    if reference_rms <= 0:
+        return pcm, best_offset
+
+    gain = min(PHONE_AMBIENCE_MAX_NORMALIZE_GAIN, PHONE_AMBIENCE_TARGET_RMS / reference_rms)
+    if gain <= 1.0:
+        return pcm, best_offset
+    return apply_pcm16_gain(pcm, gain), best_offset
+
+
 def mix_pcm16_le(foreground: bytes, background: bytes) -> bytes:
     if not foreground or not background:
         return foreground
@@ -5449,7 +5533,7 @@ class PhoneCallSession:
             pass
 
     def _next_ambience_segment(self, byte_count: int) -> bytes:
-        loop_pcm = load_phone_ambience_pcm(EXOTEL_STREAM_SAMPLE_RATE)
+        loop_pcm, preferred_start = load_phone_ambience_profile(EXOTEL_STREAM_SAMPLE_RATE)
         if not loop_pcm or byte_count <= 0:
             return b""
         with self._lock:
@@ -5457,6 +5541,9 @@ class PhoneCallSession:
             total = len(loop_pcm)
             if total <= 0:
                 return b""
+            if cursor <= 0 and preferred_start > 0:
+                cursor = min(preferred_start, max(total - 2, 0))
+                self._ambience_cursor_bytes = cursor
             end = cursor + byte_count
             if end <= total:
                 segment = loop_pcm[cursor:end]
@@ -5518,7 +5605,8 @@ class PhoneCallSession:
                         self._ambience_started_logged = True
                         self.log_event("ambience_first_audio", {"gain": PHONE_AMBIENCE_IDLE_GAIN})
                     self._send_pcm_chunk(apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN), ambience_gain=0.0)
-                except Exception:
+                except Exception as exc:
+                    self.log_event("ambience_error", {"message": str(exc)[:160]})
                     return
             time.sleep(sleep_seconds)
 

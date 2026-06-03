@@ -273,6 +273,51 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertIn("pending DHL invoices", hinglish)
         self.assertNotIn("credit account", english)
 
+    def test_phone_ambience_profile_starts_from_stronger_section(self) -> None:
+        raw = policy_app.load_phone_ambience_pcm(policy_app.EXOTEL_STREAM_SAMPLE_RATE)
+        processed, start_offset = policy_app.load_phone_ambience_profile(policy_app.EXOTEL_STREAM_SAMPLE_RATE)
+
+        self.assertTrue(raw)
+        self.assertTrue(processed)
+        self.assertGreater(start_offset, 0)
+        raw_head_rms = policy_app.pcm16_rms(raw[:1600])
+        processed_start_rms = policy_app.pcm16_rms(processed[start_offset : start_offset + 1600])
+        self.assertGreater(processed_start_rms, raw_head_rms)
+
+    def test_llm_mode_uses_fast_deterministic_path_for_line_by_line_request(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "text": "Thank you for confirming. My name is Yogesh and I am calling from DHL Express India. I am calling about your pending DHL invoices.",
+            },
+            {"role": "customer", "text": "Tell me about it line by line"},
+        ]
+
+        original_mode = policy_app.POLICY_ENGINE_MODE
+        original_client = policy_app.OPENAI_CLIENT
+
+        class ExplodingClient:
+            def __getattr__(self, _: str):
+                raise AssertionError("LLM client should not be used for fast deterministic turns")
+
+        try:
+            policy_app.POLICY_ENGINE_MODE = "llm"
+            policy_app.OPENAI_CLIENT = ExplodingClient()
+            text, tool_calls, usage_events, error = policy_app.run_chat_agent_turn(
+                messages=messages,
+                voice="shubh",
+                account_number="DHL001",
+                language_advice={"suggested_language_id": "english", "detected_language_id": "english"},
+            )
+        finally:
+            policy_app.POLICY_ENGINE_MODE = original_mode
+            policy_app.OPENAI_CLIENT = original_client
+
+        self.assertIsNone(error)
+        self.assertEqual(usage_events, [])
+        self.assertIn("one at a time", text.lower())
+        self.assertTrue(any(call["name"] == "get_invoices" for call in tool_calls))
+
     def test_phone_session_recent_barge_in_keeps_short_final_confirmation(self) -> None:
         session = policy_app.PhoneCallSession(
             session_id="cost_session_phone_test",
