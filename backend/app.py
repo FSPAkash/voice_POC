@@ -167,10 +167,10 @@ PHONE_STT_SILENCE_FLUSH_SECONDS = _env_float("PHONE_STT_SILENCE_FLUSH_SECONDS", 
 PHONE_TURN_COMMIT_DELAY_SECONDS = _env_float("PHONE_TURN_COMMIT_DELAY_SECONDS", 0.1, minimum=0.0, maximum=1.0)
 PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS = _env_float("PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS", 0.38, minimum=0.0, maximum=1.0)
 PHONE_AMBIENCE_ENABLED = _env_flag("PHONE_AMBIENCE_ENABLED", True)
-PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 1.0, minimum=0.0, maximum=4.0)
-PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.45, minimum=0.0, maximum=4.0)
-PHONE_AMBIENCE_TARGET_RMS = _env_float("PHONE_AMBIENCE_TARGET_RMS", 1400.0, minimum=200.0, maximum=6000.0)
-PHONE_AMBIENCE_MAX_NORMALIZE_GAIN = _env_float("PHONE_AMBIENCE_MAX_NORMALIZE_GAIN", 4.0, minimum=1.0, maximum=12.0)
+PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 2.2, minimum=0.0, maximum=4.0)
+PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.3, minimum=0.0, maximum=4.0)
+PHONE_AMBIENCE_TARGET_RMS = _env_float("PHONE_AMBIENCE_TARGET_RMS", 2400.0, minimum=200.0, maximum=6000.0)
+PHONE_AMBIENCE_MAX_NORMALIZE_GAIN = _env_float("PHONE_AMBIENCE_MAX_NORMALIZE_GAIN", 8.0, minimum=1.0, maximum=12.0)
 PHONE_AMBIENCE_FILE = BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav"
 PHONE_GREETING_BARGE_IN_GRACE_SECONDS = _env_float("PHONE_GREETING_BARGE_IN_GRACE_SECONDS", 1.6, minimum=0.0, maximum=5.0)
 
@@ -213,7 +213,7 @@ SARVAM_VOICES = [
 ]
 
 SARVAM_RECOMMENDED_MALE_VOICE_BY_LANGUAGE = {
-    "en-IN": "ratan",
+    "en-IN": "aditya",
     "hi-IN": "shubh",
     "te-IN": "shubh",
     "kn-IN": "shubh",
@@ -1704,29 +1704,28 @@ def opening_purpose_text(
     voice: str | None,
 ) -> str:
     total_text = total_summary_text(customer, invoices, language_id)
-    intro = agent_intro_text(language_id, voice)
     if language_id in {"hinglish", "hindi"}:
         return (
-            f"जी, धन्यवाद. {intro} मैं आपके pending DHL invoices के बारे में {agent_calling_phrase(voice)}. "
+            f"जी, धन्यवाद. मैं आपके pending DHL invoices के बारे में {agent_calling_phrase(voice)}. "
             f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "marathi":
         return (
-            f"\u0927\u0928\u094d\u092f\u0935\u093e\u0926. {intro} \u092e\u0940 \u0924\u0941\u092e\u091a\u094d\u092f\u093e pending DHL invoices \u092c\u0926\u094d\u0926\u0932 call \u0915\u0930\u0924 \u0906\u0939\u0947. "
+            f"\u0927\u0928\u094d\u092f\u0935\u093e\u0926. \u092e\u0940 \u0924\u0941\u092e\u091a\u094d\u092f\u093e pending DHL invoices \u092c\u0926\u094d\u0926\u0932 call \u0915\u0930\u0924 \u0906\u0939\u0947. "
             f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "tamil":
         return (
-            f"\u0ba8\u0ba9\u0bcd\u0bb1\u0bbf. {intro} \u0ba8\u0bbe\u0ba9\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd pending DHL invoices \u0baa\u0bb1\u0bcd\u0bb1\u0bbf call \u0b9a\u0bc6\u0baf\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. "
+            f"\u0ba8\u0ba9\u0bcd\u0bb1\u0bbf. \u0ba8\u0bbe\u0ba9\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd pending DHL invoices \u0baa\u0bb1\u0bcd\u0bb1\u0bbf call \u0b9a\u0bc6\u0baf\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. "
             f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "bengali":
         return (
-            f"Dhonnobad confirm korar jonno. {intro} Ami apnar pending DHL invoice niye call korchi. "
+            f"Dhonnobad confirm korar jonno. Ami apnar pending DHL invoice niye call korchi. "
             f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     return (
-        f"Thank you for confirming. {intro} I am calling about your pending DHL invoices. "
+        f"Thank you for confirming. I am calling about your pending DHL invoices. "
         f"{total_text} {reason_probe_text(language_id)}"
     ).strip()
 
@@ -5453,7 +5452,7 @@ class PhoneCallSession:
         self._speech_seconds_since_flush = 0.0
         self._silence_seconds_since_speech = 0.0
         self._flush_sent_for_current_pause = False
-        self._event_log: deque[dict[str, Any]] = deque(maxlen=40)
+        self._event_log: deque[dict[str, Any]] = deque(maxlen=80)
         self._finalized = False
         self._greeting_started = False
         self._ambience_cursor_bytes = 0
@@ -5634,14 +5633,22 @@ class PhoneCallSession:
                 return
             if self._current_response_id or self._current_mark_name or self._tts_upstream:
                 return
-        ambience = self._next_ambience_segment(max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.18), 320))
+        ambience = self._next_ambience_segment(max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.32), 320))
         if not ambience:
             return
         try:
+            scaled = apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN)
             if not self._ambience_started_logged:
                 self._ambience_started_logged = True
-                self.log_event("ambience_first_audio", {"gain": PHONE_AMBIENCE_IDLE_GAIN})
-            self._send_pcm_chunk(apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN), ambience_gain=0.0)
+                self.log_event(
+                    "ambience_first_audio",
+                    {
+                        "gain": PHONE_AMBIENCE_IDLE_GAIN,
+                        "rms": int(round(pcm16_rms(scaled))),
+                    },
+                )
+            if not self._send_pcm_chunk(scaled, ambience_gain=0.0):
+                self.log_event("ambience_error", {"message": "idle ambience send returned false"})
         except Exception as exc:
             self.log_event("ambience_error", {"message": str(exc)[:160]})
 
@@ -5660,10 +5667,20 @@ class PhoneCallSession:
             ambience = self._next_ambience_segment(chunk_size)
             if ambience:
                 try:
+                    scaled = apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN)
                     if not self._ambience_started_logged:
                         self._ambience_started_logged = True
-                        self.log_event("ambience_first_audio", {"gain": PHONE_AMBIENCE_IDLE_GAIN})
-                    self._send_pcm_chunk(apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN), ambience_gain=0.0)
+                        self.log_event(
+                            "ambience_first_audio",
+                            {
+                                "gain": PHONE_AMBIENCE_IDLE_GAIN,
+                                "rms": int(round(pcm16_rms(scaled))),
+                            },
+                        )
+                    if not self._send_pcm_chunk(scaled, ambience_gain=0.0):
+                        self.log_event("ambience_error", {"message": "ambience loop send returned false"})
+                        time.sleep(0.1)
+                        continue
                 except Exception as exc:
                     self.log_event("ambience_error", {"message": str(exc)[:160]})
                     time.sleep(0.1)

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import os
-import unittest
+import base64
 import json
+import os
 import time
+import unittest
 
 from backend import app as policy_app
 
@@ -271,7 +272,8 @@ class PolicyEngineTests(unittest.TestCase):
 
         self.assertIn("pending DHL invoices", english)
         self.assertIn("pending DHL invoices", hinglish)
-        self.assertIn("मेरा नाम", hinglish)
+        self.assertNotIn("My name is", english)
+        self.assertNotIn("मेरा नाम", hinglish)
         self.assertNotIn("credit account", english)
         self.assertNotIn("DHL123456", english)
         self.assertNotIn("DHL123456", hinglish)
@@ -327,6 +329,9 @@ class PolicyEngineTests(unittest.TestCase):
 
         self.assertTrue(completed)
         self.assertTrue(any(payload.get("event") == "media" for payload in sent_payloads))
+        media_payload = next(payload for payload in sent_payloads if payload.get("event") == "media")
+        raw = base64.b64decode(str(media_payload["media"]["payload"]))
+        self.assertGreater(policy_app.pcm16_rms(raw), 2500)
 
     def test_llm_mode_uses_fast_deterministic_path_for_line_by_line_request(self) -> None:
         messages = [
@@ -460,7 +465,7 @@ class PolicyEngineTests(unittest.TestCase):
     def test_localized_sarvam_voice_prefers_language_specific_speaker(self) -> None:
         self.assertEqual(policy_app.localized_sarvam_voice("ratan", "hi-IN"), "shubh")
         self.assertEqual(policy_app.localized_sarvam_voice("priya", "bn-IN"), "roopa")
-        self.assertEqual(policy_app.localized_sarvam_voice("ratan", "en-IN"), "ratan")
+        self.assertEqual(policy_app.localized_sarvam_voice("ratan", "en-IN"), "aditya")
 
     def test_scrub_forbidden_payment_methods_preserves_cash_flow_language(self) -> None:
         cleaned = policy_app.scrub_forbidden_payment_methods(
@@ -579,7 +584,8 @@ class PolicyEngineTests(unittest.TestCase):
 
         self.assertIsNone(error)
         self.assertEqual(usage_events, [])
-        self.assertIn("Yogesh", text)
+        self.assertIn("pending DHL invoices", text)
+        self.assertNotIn("My name is", text)
         self.assertTrue(any(call["name"] == "get_invoices" for call in tool_calls))
 
     def test_hindi_script_identity_confirmation_advances_to_purpose(self) -> None:
