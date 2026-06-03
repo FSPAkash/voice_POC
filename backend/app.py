@@ -174,6 +174,12 @@ PHONE_AMBIENCE_TARGET_RMS = _env_float("PHONE_AMBIENCE_TARGET_RMS", 2400.0, mini
 PHONE_AMBIENCE_MAX_NORMALIZE_GAIN = _env_float("PHONE_AMBIENCE_MAX_NORMALIZE_GAIN", 8.0, minimum=1.0, maximum=12.0)
 PHONE_AMBIENCE_FILE = BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav"
 PHONE_GREETING_BARGE_IN_GRACE_SECONDS = _env_float("PHONE_GREETING_BARGE_IN_GRACE_SECONDS", 1.6, minimum=0.0, maximum=5.0)
+PHONE_LANGUAGE_SWITCH_CONFIRM_WINDOW_SECONDS = _env_float(
+    "PHONE_LANGUAGE_SWITCH_CONFIRM_WINDOW_SECONDS",
+    8.0,
+    minimum=1.0,
+    maximum=20.0,
+)
 
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
@@ -1249,6 +1255,102 @@ def phone_turn_commit_delay_seconds(text: str) -> float:
     if len(tokens) <= 2 and not re.search(r"[.?!।]$", trimmed):
         return max(PHONE_TURN_COMMIT_DELAY_SECONDS, PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS)
     return PHONE_TURN_COMMIT_DELAY_SECONDS
+
+
+def alpha_character_count(text: str) -> int:
+    return sum(1 for char in text if char.isalpha())
+
+
+def phone_language_switch_signal(
+    text: str,
+    detected_code: str,
+    current_language_id: str | None,
+    preferred_language_id: str | None,
+) -> dict[str, Any]:
+    trimmed = normalize_whitespace(text).strip()
+    current = supported_render_language_id(current_language_id or DEFAULT_LANGUAGE_ID)
+    preferred = supported_render_language_id(preferred_language_id or current)
+    if not trimmed:
+        return {"action": "keep", "candidate_language_id": current, "reason": "empty"}
+
+    explicit_language_id = explicit_language_request_language_id(trimmed)
+    if explicit_language_id:
+        explicit_language_id = supported_render_language_id(explicit_language_id)
+        return {
+            "action": "switch",
+            "candidate_language_id": explicit_language_id,
+            "reason": "explicit_request",
+        }
+
+    if is_plain_english(trimmed):
+        return {
+            "action": "switch" if current != "english" else "keep",
+            "candidate_language_id": "english",
+            "reason": "plain_english",
+        }
+
+    tokens = stt_word_tokens(trimmed)
+    alpha_count = alpha_character_count(trimmed)
+    has_script = has_indic_script(trimmed)
+    detected_language_id = language_id_for_sarvam_code(detected_code)
+    script_language_id = None
+    if has_script:
+        script_language_id = language_id_for_script(trimmed, current, preferred)
+
+    candidate_language_id = script_language_id or detected_language_id or current
+    normalized_candidate = supported_render_language_id(candidate_language_id)
+
+    if normalized_candidate == current:
+        return {
+            "action": "keep",
+            "candidate_language_id": normalized_candidate,
+            "reason": "current_language",
+        }
+
+    if has_script and normalized_candidate != candidate_language_id:
+        return {
+            "action": "drop",
+            "candidate_language_id": current,
+            "reason": "unrenderable_script_candidate",
+        }
+
+    if has_script:
+        if len(tokens) >= 3 and alpha_count >= 8:
+            return {
+                "action": "switch",
+                "candidate_language_id": normalized_candidate,
+                "reason": "strong_script_switch",
+            }
+        if len(tokens) >= 2 and alpha_count >= 6:
+            return {
+                "action": "tentative",
+                "candidate_language_id": normalized_candidate,
+                "reason": "tentative_script_switch",
+            }
+        return {
+            "action": "drop",
+            "candidate_language_id": normalized_candidate,
+            "reason": "short_script_fragment",
+        }
+
+    if (
+        detected_language_id
+        and detected_language_id in RENDERABLE_LANGUAGE_IDS
+        and normalized_candidate != current
+        and len(tokens) >= 4
+        and alpha_count >= 12
+    ):
+        return {
+            "action": "tentative",
+            "candidate_language_id": normalized_candidate,
+            "reason": "detected_language_only",
+        }
+
+    return {
+        "action": "keep",
+        "candidate_language_id": current,
+        "reason": "no_switch_signal",
+    }
 
 
 def extract_json_payload(raw_text: str) -> dict[str, Any]:
@@ -5553,6 +5655,8 @@ class PhoneCallSession:
         self._ambience_thread: threading.Thread | None = None
         self._ambience_started_logged = False
         self._media_send_lock = threading.Lock()
+        self._pending_language_candidate: str | None = None
+        self._pending_language_candidate_at: float | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -5644,6 +5748,25 @@ class PhoneCallSession:
                 if entry.get("role") == "assistant":
                     return str(entry.get("text") or "")
         return ""
+
+    def _clear_pending_language_candidate_locked(self) -> None:
+        self._pending_language_candidate = None
+        self._pending_language_candidate_at = None
+
+    def _confirm_tentative_language_candidate(self, candidate_language_id: str) -> bool:
+        normalized = supported_render_language_id(candidate_language_id or self.active_language_id)
+        now = time.time()
+        with self._lock:
+            if (
+                self._pending_language_candidate == normalized
+                and self._pending_language_candidate_at is not None
+                and now - self._pending_language_candidate_at <= PHONE_LANGUAGE_SWITCH_CONFIRM_WINDOW_SECONDS
+            ):
+                self._clear_pending_language_candidate_locked()
+                return True
+            self._pending_language_candidate = normalized
+            self._pending_language_candidate_at = now
+        return False
 
     def _cancel_playback_finish_timer_locked(self) -> None:
         timer = self._playback_finish_timer
@@ -5797,16 +5920,24 @@ class PhoneCallSession:
         threading.Thread(target=self._run_supervisor_review, daemon=True).start()
         return True
 
-    def _handle_language_detection(self, detected_code: str, text: str = "") -> None:
-        if text and not should_apply_language_switch_hint(text):
+    def _handle_language_detection(
+        self,
+        detected_code: str,
+        text: str = "",
+        candidate_language_id: str | None = None,
+    ) -> None:
+        if text and not should_apply_language_switch_hint(text) and not candidate_language_id:
             return
-        mapped = language_id_for_sarvam_code(detected_code)
-        if not mapped:
+        raw_mapped = candidate_language_id or language_id_for_sarvam_code(detected_code)
+        if not raw_mapped:
             return
+        mapped = supported_render_language_id(raw_mapped)
         with self._lock:
             if mapped == self.active_language_id:
+                self._clear_pending_language_candidate_locked()
                 return
             self.active_language_id = mapped
+            self._clear_pending_language_candidate_locked()
             next_advice = default_language_advice(mapped)
             next_advice["detected_language_id"] = mapped
             next_advice["suggested_language_id"] = mapped
@@ -6237,6 +6368,12 @@ class PhoneCallSession:
         if not trimmed:
             return
         tokens = stt_word_tokens(trimmed)
+        language_signal = phone_language_switch_signal(
+            trimmed,
+            detected_code,
+            self.active_language_id,
+            self.language_id,
+        )
         now = time.time()
         explicit_language_request = bool(explicit_language_request_language_id(trimmed))
         opening_protection_active, opening_started_at = self._opening_barge_in_protection_state()
@@ -6280,7 +6417,33 @@ class PhoneCallSession:
         if is_stt_hallucination(trimmed):
             self._append_transcript("system", "Dropped transcript hallucination (STT echoed prompt on silence).")
             return
-        self._handle_language_detection(detected_code, trimmed)
+        signal_action = str(language_signal.get("action") or "keep")
+        signal_candidate = supported_render_language_id(
+            language_signal.get("candidate_language_id") or self.active_language_id
+        )
+        if signal_action == "drop":
+            self.log_event(
+                "stt_dropped",
+                {
+                    "reason": str(language_signal.get("reason") or "unexpected_language_fragment"),
+                    "text": trimmed[:120],
+                },
+            )
+            return
+        if signal_action == "tentative" and signal_candidate != supported_render_language_id(self.active_language_id):
+            if not self._confirm_tentative_language_candidate(signal_candidate):
+                self.log_event(
+                    "stt_dropped",
+                    {
+                        "reason": str(language_signal.get("reason") or "tentative_language_switch"),
+                        "text": trimmed[:120],
+                    },
+                )
+                return
+        else:
+            with self._lock:
+                self._clear_pending_language_candidate_locked()
+        self._handle_language_detection(detected_code, trimmed, signal_candidate)
         self._append_transcript("customer", trimmed)
         with self._lock:
             self._customer_revision += 1

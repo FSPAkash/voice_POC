@@ -196,6 +196,51 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertGreater(short_delay, long_delay)
         self.assertEqual(long_delay, policy_app.PHONE_TURN_COMMIT_DELAY_SECONDS)
 
+    def test_phone_language_switch_signal_drops_short_unrenderable_script_noise(self) -> None:
+        signal = policy_app.phone_language_switch_signal(
+            "\u0ab9\u0abe \u0ab0\u0ac7 \u0aa4\u0acb",
+            "gu-IN",
+            "hinglish",
+            "hinglish",
+        )
+
+        self.assertEqual(signal["action"], "drop")
+        self.assertEqual(signal["reason"], "unrenderable_script_candidate")
+
+    def test_phone_language_switch_signal_allows_substantive_supported_script_switch(self) -> None:
+        signal = policy_app.phone_language_switch_signal(
+            "\u0b8e\u0ba9\u0b95\u0bcd\u0b95\u0bc1 payment approval \u0b87\u0ba9\u0bcd\u0ba9\u0bc1\u0bae\u0bcd \u0b95\u0bbf\u0b9f\u0bc8\u0b95\u0bcd\u0b95\u0bb5\u0bbf\u0bb2\u0bcd\u0bb2\u0bc8",
+            "ta-IN",
+            "hinglish",
+            "hinglish",
+        )
+
+        self.assertEqual(signal["action"], "switch")
+        self.assertEqual(signal["candidate_language_id"], "tamil")
+
+    def test_phone_session_confirms_short_supported_language_switch_on_repeat(self) -> None:
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+
+        session._handle_final_transcript("\u0ba8\u0bbe\u0ba9\u0bcd \u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0ba4\u0bbe\u0ba9\u0bcd", "ta-IN")
+
+        self.assertFalse(any(entry["role"] == "customer" for entry in session.transcript))
+        self.assertEqual(session.active_language_id, "hinglish")
+
+        session._handle_final_transcript("\u0ba8\u0bbe\u0ba9\u0bcd \u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0ba4\u0bbe\u0ba9\u0bcd", "ta-IN")
+        timer = session._turn_commit_timer
+        if timer is not None:
+            timer.cancel()
+
+        self.assertTrue(any(entry["role"] == "customer" for entry in session.transcript))
+        self.assertEqual(session.active_language_id, "tamil")
+
     def test_phone_session_short_partial_needs_real_speech_before_barge_in(self) -> None:
         session = policy_app.PhoneCallSession(
             session_id="cost_session_phone_test",
