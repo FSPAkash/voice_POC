@@ -1539,8 +1539,8 @@ def agent_intro_text(language_id: str, voice: str | None) -> str:
     persona = persona_for_voice(voice)
     name = persona["name"]
     if language_id in {"hinglish", "hindi"}:
-        verb = "bol rahi hoon" if persona["gender"] == "female" else "bol raha hoon"
-        return f"Mera naam {name} hai, main DHL Express India se {verb}."
+        verb = "बोल रही हूँ" if persona["gender"] == "female" else "बोल रहा हूँ"
+        return f"मेरा नाम {name} है, मैं DHL Express India से {verb}."
     if language_id == "marathi":
         return f"\u092e\u093e\u091d\u0902 \u0928\u093e\u0935 {name} \u0906\u0939\u0947, \u092e\u0940 DHL Express India \u092e\u0927\u0942\u0928 \u092c\u094b\u0932\u0924 \u0906\u0939\u0947."
     if language_id == "tamil":
@@ -1551,12 +1551,12 @@ def agent_intro_text(language_id: str, voice: str | None) -> str:
 
 
 def agent_calling_phrase(voice: str | None) -> str:
-    return "call kar rahi hoon" if persona_for_voice(voice)["gender"] == "female" else "call kar raha hoon"
+    return "call कर रही हूँ" if persona_for_voice(voice)["gender"] == "female" else "call कर रहा हूँ"
 
 
 def reason_probe_text(language_id: str) -> str:
     if language_id in {"hinglish", "hindi"}:
-        return "Payment abhi tak hold kyun hai, thoda bata dijiye. Main note kar leta hoon."
+        return "Payment अभी तक hold क्यों है, थोड़ा बता दीजिए. मैं note कर लेता हूँ."
     if language_id == "marathi":
         return "\u0915\u0943\u092a\u092f\u093e \u0935\u093f\u0932\u0902\u092c\u093e\u091a\u0902 \u0915\u093e\u0930\u0923 \u0938\u093e\u0902\u0917\u093e\u0932 \u0915\u093e, \u092e\u094d\u0939\u0923\u091c\u0947 \u092e\u0940 \u0924\u0947 \u0928\u0940\u091f \u0928\u094b\u0902\u0926\u0935\u0942 \u0936\u0915\u0947\u0928?"
     if language_id == "tamil":
@@ -1568,7 +1568,7 @@ def reason_probe_text(language_id: str) -> str:
 
 def payment_date_request_text(language_id: str) -> str:
     if language_id in {"hinglish", "hindi"}:
-        return "Aap payment kab tak release kar paayenge? Next 2 business days ke andar ek clear date bata dijiye."
+        return "आप payment कब तक release कर पाएँगे? Next 2 business days के अंदर एक clear date बता दीजिए."
     if language_id == "marathi":
         return "\u092a\u0941\u0922\u0940\u0932 2 business days \u092e\u0927\u094d\u092f\u0947 \u0928\u0947\u092e\u0915\u0940 payment date confirm \u0915\u0930\u0942 \u0936\u0915\u093e\u0932 \u0915\u093e?"
     if language_id == "tamil":
@@ -1582,7 +1582,7 @@ def resolved_status_summary_text(invoices: list[dict[str, Any]], language_id: st
     if not any(invoice.get("history") for invoice in invoices):
         return ""
     if language_id in {"hinglish", "hindi"}:
-        return "Jin invoices par pehle issues the, woh ab resolve ho chuke hain. Ab sirf payment clear hona baaki hai."
+        return "जिन invoices पर पहले issues थे, वे अब resolve हो चुके हैं. अब सिर्फ payment clear होना बाकी है."
     if language_id == "marathi":
         return "\u091c\u094d\u092f\u093e invoices \u0935\u0930 \u0906\u0927\u0940 issues \u0939\u094b\u0924\u0947 \u0924\u0947 resolve \u091d\u093e\u0932\u0947 \u0906\u0939\u0947\u0924, \u092e\u094d\u0939\u0923\u0942\u0928 \u0906\u0924\u093e \u092b\u0915\u094d\u0924 payment pending \u0906\u0939\u0947."
     if language_id == "tamil":
@@ -1595,13 +1595,13 @@ def resolved_status_summary_text(invoices: list[dict[str, Any]], language_id: st
 def payment_options_text(language_id: str) -> str:
     if language_id == "hinglish":
         return (
-            "Payment ke liye do options hain: DHL MyBill self-serve portal, "
-            "ya Virtual Account Number bank transfer."
+            "Payment के लिए दो options हैं: DHL MyBill self-serve portal, "
+            "या Virtual Account Number bank transfer."
         )
     if language_id == "hindi":
         return (
-            "Payment ke liye do options hain: DHL MyBill self-serve portal, "
-            "ya Virtual Account Number bank transfer."
+            "Payment के लिए दो options हैं: DHL MyBill self-serve portal, "
+            "या Virtual Account Number bank transfer."
         )
     if language_id == "marathi":
         return (
@@ -1634,13 +1634,13 @@ def invoice_summary_line(invoice: dict[str, Any], language_id: str) -> str:
     due_date = str(invoice.get("due_date") or "")
     if language_id == "hinglish":
         return (
-            f"Invoice {invoice.get('invoice_no')} ka amount {amount} hai. "
-            f"Due date {due_date} thi, aur yeh ab {overdue_days} din se overdue hai."
+            f"Invoice {invoice.get('invoice_no')} का amount {amount} है. "
+            f"Due date {due_date} थी, और यह अब {overdue_days} दिन से overdue है."
         )
     if language_id == "hindi":
         return (
-            f"Invoice {invoice.get('invoice_no')} ka amount {amount} hai. "
-            f"Due date {due_date} thi, aur yeh ab {overdue_days} din se overdue hai."
+            f"Invoice {invoice.get('invoice_no')} का amount {amount} है. "
+            f"Due date {due_date} थी, और यह अब {overdue_days} दिन से overdue है."
         )
     if language_id == "marathi":
         return (
@@ -1668,13 +1668,13 @@ def total_summary_text(customer: dict[str, Any], invoices: list[dict[str, Any]],
     company = str(customer.get("company_name") or "your company")
     if language_id == "hinglish":
         return (
-            f"{company} ke DHL account par total {total} outstanding hai, "
-            f"aur {len(invoices)} invoices overdue chal rahe hain."
+            f"{company} के DHL account पर total {total} outstanding है, "
+            f"और {len(invoices)} invoices overdue चल रहे हैं."
         )
     if language_id == "hindi":
         return (
-            f"{company} ke DHL account par total {total} outstanding hai, "
-            f"aur {len(invoices)} invoices overdue chal rahe hain."
+            f"{company} के DHL account पर total {total} outstanding है, "
+            f"और {len(invoices)} invoices overdue चल रहे हैं."
         )
     if language_id == "marathi":
         return (
@@ -1703,34 +1703,31 @@ def opening_purpose_text(
     language_id: str,
     voice: str | None,
 ) -> str:
-    target_invoice = invoices[0] if invoices else {}
     total_text = total_summary_text(customer, invoices, language_id)
-    invoice_text = invoice_summary_line(target_invoice, language_id) if target_invoice else ""
-    resolved_text = resolved_status_summary_text(invoices, language_id)
     intro = agent_intro_text(language_id, voice)
     if language_id in {"hinglish", "hindi"}:
         return (
-            f"Ji, thanks. {intro} Main aapke pending DHL invoices ke baare mein {agent_calling_phrase(voice)}. "
-            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
+            f"जी, धन्यवाद. {intro} मैं आपके pending DHL invoices के बारे में {agent_calling_phrase(voice)}. "
+            f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "marathi":
         return (
             f"\u0927\u0928\u094d\u092f\u0935\u093e\u0926. {intro} \u092e\u0940 \u0924\u0941\u092e\u091a\u094d\u092f\u093e pending DHL invoices \u092c\u0926\u094d\u0926\u0932 call \u0915\u0930\u0924 \u0906\u0939\u0947. "
-            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
+            f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "tamil":
         return (
             f"\u0ba8\u0ba9\u0bcd\u0bb1\u0bbf. {intro} \u0ba8\u0bbe\u0ba9\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd pending DHL invoices \u0baa\u0bb1\u0bcd\u0bb1\u0bbf call \u0b9a\u0bc6\u0baf\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. "
-            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
+            f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "bengali":
         return (
             f"Dhonnobad confirm korar jonno. {intro} Ami apnar pending DHL invoice niye call korchi. "
-            f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
+            f"{total_text} {reason_probe_text(language_id)}"
         ).strip()
     return (
         f"Thank you for confirming. {intro} I am calling about your pending DHL invoices. "
-        f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
+        f"{total_text} {reason_probe_text(language_id)}"
     ).strip()
 
 
@@ -1992,6 +1989,16 @@ FAST_DETERMINISTIC_SIGNAL_NAMES = {
 }
 
 
+def looks_like_repeat_request(text: str) -> bool:
+    lowered = normalize_whitespace(text).lower()
+    if not lowered:
+        return False
+    return bool(re.search(
+        r"(?:\b(?:repeat|say again|come again|pardon|sorry,? what|i do(?: not|n't) understand(?: it)?|did(?: not|n't) understand|not clear)\b|दुबारा|फिर से|क्या कहा|समझ नहीं|समझा नहीं|कुछ समझा नहीं|समझ में नहीं आया)",
+        lowered,
+    ))
+
+
 def should_use_fast_deterministic_turn(messages: list[dict[str, Any]]) -> bool:
     entries = transcript_entries_from_messages(messages)
     latest_customer = last_entry(entries, "customer")
@@ -2002,10 +2009,20 @@ def should_use_fast_deterministic_turn(messages: list[dict[str, Any]]) -> bool:
     signals = analyze_customer_turn(customer_text)
     assistant_turns = count_entries(entries, "assistant")
     raw_date, _ = parse_customer_date(customer_text)
+    repeat_like = looks_like_repeat_request(customer_text)
+    first_turn_fast = assistant_turns <= 1 and (
+        signals["is_affirmative"]
+        or signals["why_calling"]
+        or signals["wrong_contact"]
+        or signals["identity_confusion"]
+        or repeat_like
+    )
 
-    if assistant_turns <= 1:
+    if first_turn_fast:
         return True
     if raw_date:
+        return True
+    if repeat_like:
         return True
     return any(signals.get(name) for name in FAST_DETERMINISTIC_SIGNAL_NAMES)
 
@@ -2031,6 +2048,7 @@ def generate_collections_reply(
     prior_tool_calls = prior_tool_calls or []
     customer_text = latest_customer["text"]
     signals = analyze_customer_turn(customer_text)
+    signals["repeat_request"] = bool(signals.get("repeat_request") or looks_like_repeat_request(customer_text))
     constants = get_collections_constants()
     target_invoice = invoice_mentioned_in_text(customer_text, invoices) or (invoices[0] if invoices else {})
     purpose_already_stated = assistant_has_stated_purpose(entries)
@@ -2154,12 +2172,20 @@ def generate_collections_reply(
     if signals["repeat_request"]:
         if language_id in {"hinglish", "hindi"}:
             return (
-                "Sorry, main dheere se dobara bolta hoon. " + total_summary_text(customer, invoices, language_id),
+                (
+                    "ठीक है, मैं आसान तरीके से दोबारा बताता हूँ. "
+                    f"{total_summary_text(customer, invoices, language_id)} "
+                    "क्या payment पर कोई approval या internal hold है?"
+                ),
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
         return (
-            "Apologies, let me repeat. " + total_summary_text(customer, invoices, language_id),
+            (
+                "No problem, let me keep it simple. "
+                f"{total_summary_text(customer, invoices, language_id)} "
+                "Is there any approval or internal hold on the payment?"
+            ),
             tool_calls,
             DETERMINISTIC_CHAT_MODEL,
         )
@@ -5228,15 +5254,29 @@ def load_phone_ambience_pcm(sample_rate: int) -> bytes:
     source_view = memoryview(raw)
     output = bytearray(output_frames * 2)
 
-    for out_index in range(output_frames):
-        src_index = min(frame_count - 1, int(out_index * source_rate / sample_rate))
-        offset = src_index * frame_size
+    def mono_sample(frame_index: int) -> int:
+        safe_index = max(0, min(frame_count - 1, frame_index))
+        offset = safe_index * frame_size
         if channels == 1:
-            sample = struct.unpack_from("<h", source_view, offset)[0]
-        else:
-            left = struct.unpack_from("<h", source_view, offset)[0]
-            right = struct.unpack_from("<h", source_view, offset + 2)[0]
-            sample = int((left + right) / 2)
+            return struct.unpack_from("<h", source_view, offset)[0]
+        left = struct.unpack_from("<h", source_view, offset)[0]
+        right = struct.unpack_from("<h", source_view, offset + 2)[0]
+        return int((left + right) / 2)
+
+    if source_rate == sample_rate:
+        for out_index in range(output_frames):
+            struct.pack_into("<h", output, out_index * 2, mono_sample(out_index))
+        return bytes(output)
+
+    ratio = source_rate / sample_rate
+    for out_index in range(output_frames):
+        source_position = out_index * ratio
+        left_index = int(source_position)
+        right_index = min(left_index + 1, frame_count - 1)
+        blend = source_position - left_index
+        left_sample = mono_sample(left_index)
+        right_sample = mono_sample(right_index)
+        sample = int(round(left_sample + (right_sample - left_sample) * blend))
         struct.pack_into("<h", output, out_index * 2, sample)
     return bytes(output)
 
@@ -5586,6 +5626,25 @@ class PhoneCallSession:
         self._ambience_thread = thread
         thread.start()
 
+    def _emit_idle_ambience_once(self) -> None:
+        if not PHONE_AMBIENCE_ENABLED:
+            return
+        with self._lock:
+            if self._stop or not self.stream_sid:
+                return
+            if self._current_response_id or self._current_mark_name or self._tts_upstream:
+                return
+        ambience = self._next_ambience_segment(max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.18), 320))
+        if not ambience:
+            return
+        try:
+            if not self._ambience_started_logged:
+                self._ambience_started_logged = True
+                self.log_event("ambience_first_audio", {"gain": PHONE_AMBIENCE_IDLE_GAIN})
+            self._send_pcm_chunk(apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN), ambience_gain=0.0)
+        except Exception as exc:
+            self.log_event("ambience_error", {"message": str(exc)[:160]})
+
     def _ambience_pump(self) -> None:
         chunk_size = max(int(EXOTEL_STREAM_SAMPLE_RATE * 2 * 0.1), 320)
         sleep_seconds = chunk_size / (2 * max(EXOTEL_STREAM_SAMPLE_RATE, 1))
@@ -5607,7 +5666,8 @@ class PhoneCallSession:
                     self._send_pcm_chunk(apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN), ambience_gain=0.0)
                 except Exception as exc:
                     self.log_event("ambience_error", {"message": str(exc)[:160]})
-                    return
+                    time.sleep(0.1)
+                    continue
             time.sleep(sleep_seconds)
 
     def _complete_active_playback(self, serial: int, mark_name: str, source: str) -> bool:
@@ -5621,6 +5681,8 @@ class PhoneCallSession:
             self._last_agent_speak_start_at = None
             self.turn_number += 1
         self.log_event("playback_completed", {"source": source})
+        self._start_ambience_loop()
+        threading.Thread(target=self._emit_idle_ambience_once, daemon=True).start()
         threading.Thread(target=self._run_supervisor_review, daemon=True).start()
         return True
 

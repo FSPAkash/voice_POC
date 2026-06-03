@@ -271,7 +271,27 @@ class PolicyEngineTests(unittest.TestCase):
 
         self.assertIn("pending DHL invoices", english)
         self.assertIn("pending DHL invoices", hinglish)
+        self.assertIn("मेरा नाम", hinglish)
         self.assertNotIn("credit account", english)
+        self.assertNotIn("DHL123456", english)
+        self.assertNotIn("DHL123456", hinglish)
+
+    def test_repeat_request_helper_catches_hindi_confusion_phrase(self) -> None:
+        self.assertTrue(policy_app.looks_like_repeat_request("कुछ समझा नहीं"))
+        self.assertTrue(policy_app.looks_like_repeat_request("I do not understand it."))
+
+    def test_fast_deterministic_turn_does_not_blanket_all_first_turns(self) -> None:
+        affirmative = [
+            {"role": "assistant", "text": "Good morning, am I speaking with Anthony?"},
+            {"role": "customer", "text": "Yes, speaking."},
+        ]
+        generic = [
+            {"role": "assistant", "text": "Good morning, am I speaking with Anthony?"},
+            {"role": "customer", "text": "Maybe later."},
+        ]
+
+        self.assertTrue(policy_app.should_use_fast_deterministic_turn(affirmative))
+        self.assertFalse(policy_app.should_use_fast_deterministic_turn(generic))
 
     def test_phone_ambience_profile_starts_from_stronger_section(self) -> None:
         raw = policy_app.load_phone_ambience_pcm(policy_app.EXOTEL_STREAM_SAMPLE_RATE)
@@ -283,6 +303,30 @@ class PolicyEngineTests(unittest.TestCase):
         raw_head_rms = policy_app.pcm16_rms(raw[:1600])
         processed_start_rms = policy_app.pcm16_rms(processed[start_offset : start_offset + 1600])
         self.assertGreater(processed_start_rms, raw_head_rms)
+
+    def test_phone_session_emits_idle_ambience_after_playback_completion(self) -> None:
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+        sent_payloads: list[dict[str, object]] = []
+        session._send_json = sent_payloads.append  # type: ignore[assignment]
+        session.stream_sid = "demo_stream"
+        session._current_tts_serial = 2
+        session._current_response_id = "utt_demo"
+        session._current_mark_name = "mark_utt_demo"
+        session._current_response_text = "Greeting"
+
+        completed = session._complete_active_playback(2, "mark_utt_demo", "timer_fallback")
+        time.sleep(0.25)
+        session._stop = True
+
+        self.assertTrue(completed)
+        self.assertTrue(any(payload.get("event") == "media" for payload in sent_payloads))
 
     def test_llm_mode_uses_fast_deterministic_path_for_line_by_line_request(self) -> None:
         messages = [
@@ -317,6 +361,28 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(usage_events, [])
         self.assertIn("one at a time", text.lower())
         self.assertTrue(any(call["name"] == "get_invoices" for call in tool_calls))
+
+    def test_repeat_request_branch_stays_short_and_on_tree(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "text": "Thank you for confirming. My name is Yogesh and I am calling from DHL Express India. I am calling about your pending DHL invoices.",
+            },
+            {"role": "customer", "text": "I do not understand it."},
+        ]
+
+        text, tool_calls, usage_events, error = policy_app.run_chat_agent_turn(
+            messages=messages,
+            voice="shubh",
+            account_number="DHL001",
+            language_advice={"suggested_language_id": "english", "detected_language_id": "english"},
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(usage_events, [])
+        self.assertIn("let me keep it simple", text.lower())
+        self.assertNotIn("DHL123456", text)
+        self.assertEqual(tool_calls, [])
 
     def test_phone_session_recent_barge_in_keeps_short_final_confirmation(self) -> None:
         session = policy_app.PhoneCallSession(
