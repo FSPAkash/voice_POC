@@ -167,8 +167,8 @@ PHONE_STT_SILENCE_FLUSH_SECONDS = _env_float("PHONE_STT_SILENCE_FLUSH_SECONDS", 
 PHONE_TURN_COMMIT_DELAY_SECONDS = _env_float("PHONE_TURN_COMMIT_DELAY_SECONDS", 0.1, minimum=0.0, maximum=1.0)
 PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS = _env_float("PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS", 0.38, minimum=0.0, maximum=1.0)
 PHONE_AMBIENCE_ENABLED = _env_flag("PHONE_AMBIENCE_ENABLED", True)
-PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 0.85, minimum=0.0, maximum=1.0)
-PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.22, minimum=0.0, maximum=1.0)
+PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 3.8, minimum=0.0, maximum=6.0)
+PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 1.1, minimum=0.0, maximum=6.0)
 PHONE_AMBIENCE_FILE = BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav"
 PHONE_GREETING_BARGE_IN_GRACE_SECONDS = _env_float("PHONE_GREETING_BARGE_IN_GRACE_SECONDS", 1.6, minimum=0.0, maximum=5.0)
 
@@ -1059,6 +1059,51 @@ def stt_word_tokens(text: str) -> list[str]:
     return _STT_TOKEN_RE.findall(normalize_whitespace(text).casefold())
 
 
+_WEAK_OPENING_INTERRUPTION_PHRASES = {
+    "hello",
+    "hello ji",
+    "hello sir",
+    "hello madam",
+    "hello maam",
+    "hi",
+    "yes",
+    "yes sir",
+    "yes ji",
+    "yeah",
+    "yep",
+    "ok",
+    "okay",
+    "sir",
+    "madam",
+    "maam",
+    "ji",
+    "haan",
+    "haan ji",
+    "ji haan",
+    "han",
+    "hmm",
+    "hmmm",
+    "hmm ji",
+    "boliye",
+    "bolo",
+    "suniye",
+    "ji boliye",
+}
+
+
+def is_weak_opening_interruption(text: str) -> bool:
+    tokens = stt_word_tokens(text)
+    if not tokens:
+        return True
+    phrase = " ".join(tokens)
+    if phrase in _WEAK_OPENING_INTERRUPTION_PHRASES:
+        return True
+    if len(tokens) == 1:
+        token = tokens[0]
+        return len(token) <= 3 or token in {"hello", "hi", "yes", "ji", "haan", "han", "hmm", "sir"}
+    return False
+
+
 def looks_like_agent_echo(transcript_text: str, assistant_text: str) -> bool:
     customer = normalize_whitespace(transcript_text).strip().casefold()
     assistant = normalize_whitespace(assistant_text).strip().casefold()
@@ -1663,26 +1708,26 @@ def opening_purpose_text(
     intro = agent_intro_text(language_id, voice)
     if language_id in {"hinglish", "hindi"}:
         return (
-            f"Ji, thanks. {intro} Main aapki pending payment ke baare mein {agent_calling_phrase(voice)}. "
+            f"Ji, thanks. {intro} Main aapke pending DHL invoices ke baare mein {agent_calling_phrase(voice)}. "
             f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "marathi":
         return (
-            f"\u0927\u0928\u094d\u092f\u0935\u093e\u0926. {intro} \u092e\u0940 \u0924\u0941\u092e\u091a\u094d\u092f\u093e DHL credit account \u0938\u0902\u0926\u0930\u094d\u092d\u093e\u0924 call \u0915\u0930\u0924 \u0906\u0939\u0947. "
+            f"\u0927\u0928\u094d\u092f\u0935\u093e\u0926. {intro} \u092e\u0940 \u0924\u0941\u092e\u091a\u094d\u092f\u093e pending DHL invoices \u092c\u0926\u094d\u0926\u0932 call \u0915\u0930\u0924 \u0906\u0939\u0947. "
             f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "tamil":
         return (
-            f"\u0ba8\u0ba9\u0bcd\u0bb1\u0bbf. {intro} \u0ba8\u0bbe\u0ba9\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd DHL credit account \u0baa\u0bb1\u0bcd\u0bb1\u0bbf call \u0b9a\u0bc6\u0baf\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. "
+            f"\u0ba8\u0ba9\u0bcd\u0bb1\u0bbf. {intro} \u0ba8\u0bbe\u0ba9\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd pending DHL invoices \u0baa\u0bb1\u0bcd\u0bb1\u0bbf call \u0b9a\u0bc6\u0baf\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. "
             f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
     if language_id == "bengali":
         return (
-            f"Dhonnobad confirm korar jonno. {intro} Ami apnar credit account niye call korchi. "
+            f"Dhonnobad confirm korar jonno. {intro} Ami apnar pending DHL invoice niye call korchi. "
             f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
         ).strip()
     return (
-        f"Thank you for confirming. {intro} I am calling regarding your DHL credit account. "
+        f"Thank you for confirming. {intro} I am calling about your pending DHL invoices. "
         f"{total_text} {invoice_text} {resolved_text} {reason_probe_text(language_id)}"
     ).strip()
 
@@ -3469,7 +3514,7 @@ LLM_TURN_TOOLS = {
     "get_customer",
 }
 
-LLM_COLLECTIONS_SYSTEM = """You are the DHL Express India collections agent for an outbound call.
+LLM_COLLECTIONS_SYSTEM = """You are the DHL Express India payment follow-up agent for an outbound call.
 Persona name and voice are provided per turn.
 
 The user message will contain a CANONICAL GROUND TRUTH DOCUMENT followed by a LIVE GROUNDED CONTEXT block. Together they are the ONLY source of truth for this call. Treat them as immutable. Do not rely on training-data knowledge of "DHL invoices" or "typical Indian B2B amounts" — only on what is in those two blocks.
@@ -3485,10 +3530,11 @@ HARD RULES (never violate):
 - If the customer is in distress or a safety concern, hand off to human immediately.
 - Match the customer's language. If they speak in plain English, reply in English. Hinglish opening is OK; switch fully on explicit request or a clearly English customer turn.
 - Keep replies short and natural — one short paragraph max. Do not dump every invoice unless the customer explicitly asks for the full list.
-- Sound like a live Indian B2B collections caller, not a translator, legal notice, training script, or chatbot.
+- Never tell the customer you are "calling about collections", a "collections case", or "recovery". Say you are calling about pending invoices, overdue invoices, or pending payment on the DHL account.
+- Sound like a live Indian B2B payment follow-up caller, not a translator, legal notice, training script, or chatbot.
 - For Hindi/Hinglish, use spoken Indian business language. Keep common business words like payment, invoice, due date, approval, account, portal, hold, clear, release, and date in English script when that sounds more natural.
 - Avoid bookish or bureaucratic wording such as "कृपया अवगत कराइए", "संदर्भ में", "उक्त", "भुगतान लंबित है", "निराकरण", "व्यवस्था करें", or "कृपया पुष्टि करें". Prefer spoken phrasing like "बताइए", "date share कर दीजिए", "payment अभी तक hold क्यों है?", "issue resolve हो गया", and "payment clear कर दीजिए".
-- Collections tone target: warm, direct, lightly firm, and a little informal. You are calling to secure a payment commitment, not to educate the customer or read a policy memo.
+- Tone target: warm, direct, lightly firm, and a little informal. You are calling to secure a payment commitment, not to educate the customer or read a policy memo.
 - Sound like a real phone caller, not a polished corporate announcer. Short everyday phrasing is better than formal phrasing.
 
 OUTPUT (strict JSON, no markdown):
@@ -3659,7 +3705,7 @@ def llm_collections_turn(
         "hinglish": (
             "HARD LANGUAGE LOCK: reply in Hindi-dominant code-mix. Hindi words MUST be written in Devanagari script. "
             "Keep brand names and common business words like DHL, MyBill, payment, invoice, due date, approval, account, portal, hold, clear, release, and line by line in English script. "
-            "Sound like a live Indian collections caller on the phone: short, spoken, slightly informal, and natural. "
+            "Sound like a live Indian payment follow-up caller on the phone: short, spoken, slightly informal, and natural. "
             "Prefer phrasing like 'payment अभी तक hold क्यों है?', 'date बता दीजिए', 'मैं note कर लेता हूँ', 'देख लीजिए', and 'payment clear कर दीजिए'. "
             "Avoid bookish Hindi like 'कृपया अवगत कराइए', 'संदर्भ में', 'भुगतान लंबित है', or 'कृपया पुष्टि करें'. "
             "Avoid sounding too polished or stiff. Use everyday phone phrasing like 'ठीक है', 'कोई दिक्कत है क्या', 'एक rough date दे दीजिए', and 'मैं note कर लेता हूँ'. "
@@ -3701,7 +3747,7 @@ def llm_collections_turn(
         *(recent_transcript_lines or ["(no turns yet — this is the very first agent line)"]),
         "",
         "STYLE TARGET:",
-        "- Outbound DHL collections call.",
+        "- Outbound DHL pending-invoice follow-up call.",
         "- Spoken, not written.",
         "- Warm, lightly firm, and slightly informal.",
         "- No policy-manual Hindi.",
@@ -5933,6 +5979,7 @@ class PhoneCallSession:
         now = time.time()
         explicit_language_request = bool(explicit_language_request_language_id(trimmed))
         opening_protection_active, opening_started_at = self._opening_barge_in_protection_state()
+        allow_short_opening_reply = False
         with self._lock:
             recent_barge_in = self._pending_barge_in_at and (now - self._pending_barge_in_at < 2.0)
             last_speak_at = self._last_agent_speak_start_at
@@ -5945,13 +5992,17 @@ class PhoneCallSession:
                 return
             if opening_protection_active and not explicit_language_request:
                 opening_elapsed = now - opening_started_at if opening_started_at is not None else None
-                if opening_elapsed is not None and opening_elapsed < PHONE_GREETING_BARGE_IN_GRACE_SECONDS:
-                    self.log_event("stt_dropped", {"reason": "greeting_grace", "text": trimmed[:120]})
+                weak_opening_interrupt = is_weak_opening_interruption(trimmed)
+                if weak_opening_interrupt:
+                    reason = (
+                        "greeting_grace"
+                        if opening_elapsed is not None and opening_elapsed < PHONE_GREETING_BARGE_IN_GRACE_SECONDS
+                        else "greeting_short"
+                    )
+                    self.log_event("stt_dropped", {"reason": reason, "text": trimmed[:120]})
                     return
-                if len(tokens) < 4:
-                    self.log_event("stt_dropped", {"reason": "greeting_short", "text": trimmed[:120]})
-                    return
-            if not recent_barge_in and len(tokens) < 3:
+                allow_short_opening_reply = True
+            if not recent_barge_in and len(tokens) < 3 and not allow_short_opening_reply:
                 self.log_event("stt_dropped", {"reason": "short_during_playback", "text": trimmed[:120]})
                 return
             if not recent_barge_in:

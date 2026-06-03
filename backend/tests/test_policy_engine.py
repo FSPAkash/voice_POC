@@ -238,6 +238,41 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(session._current_response_id, "utt_demo")
         self.assertFalse(any(entry["role"] == "customer" for entry in session.transcript))
 
+    def test_phone_session_greeting_allows_real_identity_reply_without_waiting(self) -> None:
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+        session._greeting_started = True
+        session.turn_number = 0
+        session._current_response_id = "utt_demo"
+        session._current_mark_name = "mark_utt_demo"
+        session._current_response_text = "Good evening, main Yogesh DHL Express India se bol raha hoon."
+        session._last_agent_speak_start_at = time.time()
+
+        session._handle_final_transcript("yes this is anthony", "en-IN")
+        timer = session._turn_commit_timer
+        if timer is not None:
+            timer.cancel()
+
+        self.assertIsNone(session._current_response_id)
+        self.assertTrue(any(entry["role"] == "customer" and entry["text"] == "yes this is anthony" for entry in session.transcript))
+
+    def test_opening_purpose_uses_pending_invoices_language(self) -> None:
+        customer = policy_app.get_customer("DHL001")
+        invoices = policy_app.get_invoices("DHL001")
+
+        english = policy_app.opening_purpose_text(customer, invoices, "english", policy_app.DEFAULT_REALTIME_VOICE)
+        hinglish = policy_app.opening_purpose_text(customer, invoices, "hinglish", policy_app.DEFAULT_REALTIME_VOICE)
+
+        self.assertIn("pending DHL invoices", english)
+        self.assertIn("pending DHL invoices", hinglish)
+        self.assertNotIn("credit account", english)
+
     def test_phone_session_recent_barge_in_keeps_short_final_confirmation(self) -> None:
         session = policy_app.PhoneCallSession(
             session_id="cost_session_phone_test",
