@@ -2615,7 +2615,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                         </>
                       )}
                     </div>
-                    <div className="phone__footer">{selectedRealtimeModelLabel}</div>
+                    {isClient ? null : <div className="phone__footer">{selectedRealtimeModelLabel}</div>}
                   </div>
                 </div>
               </div>
@@ -2639,7 +2639,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   <StatusPill tone={thinking ? 'neutral' : 'good'}>
                     {thinking ? 'Agent reasoning' : 'Agent ready'}
                   </StatusPill>
-                  <StatusPill tone="neutral">{selectedRealtimeModelLabel}</StatusPill>
+                  {isClient ? null : <StatusPill tone="neutral">{selectedRealtimeModelLabel}</StatusPill>}
                   <StatusPill tone="neutral">{disposition}</StatusPill>
                 </div>
               </div>
