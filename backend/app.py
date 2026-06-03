@@ -167,9 +167,10 @@ PHONE_STT_SILENCE_FLUSH_SECONDS = _env_float("PHONE_STT_SILENCE_FLUSH_SECONDS", 
 PHONE_TURN_COMMIT_DELAY_SECONDS = _env_float("PHONE_TURN_COMMIT_DELAY_SECONDS", 0.1, minimum=0.0, maximum=1.0)
 PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS = _env_float("PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS", 0.38, minimum=0.0, maximum=1.0)
 PHONE_AMBIENCE_ENABLED = _env_flag("PHONE_AMBIENCE_ENABLED", True)
-PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 0.12, minimum=0.0, maximum=1.0)
-PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.06, minimum=0.0, maximum=1.0)
+PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 0.85, minimum=0.0, maximum=1.0)
+PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.22, minimum=0.0, maximum=1.0)
 PHONE_AMBIENCE_FILE = BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav"
+PHONE_GREETING_BARGE_IN_GRACE_SECONDS = _env_float("PHONE_GREETING_BARGE_IN_GRACE_SECONDS", 1.6, minimum=0.0, maximum=5.0)
 
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
@@ -5287,6 +5288,7 @@ class PhoneCallSession:
         self._greeting_started = False
         self._ambience_cursor_bytes = 0
         self._ambience_thread: threading.Thread | None = None
+        self._ambience_started_logged = False
         self._media_send_lock = threading.Lock()
 
     def snapshot(self) -> dict[str, Any]:
@@ -5366,6 +5368,12 @@ class PhoneCallSession:
     def _is_customer_revision_current(self, revision: int) -> bool:
         with self._lock:
             return not self._stop and revision == self._customer_revision
+
+    def _opening_barge_in_protection_state(self) -> tuple[bool, float | None]:
+        with self._lock:
+            active = bool(self._greeting_started and self.turn_number == 0 and self._current_response_id)
+            speak_started_at = self._last_agent_speak_start_at
+        return active, speak_started_at
 
     def _latest_assistant_text(self) -> str:
         with self._lock:
@@ -5460,6 +5468,9 @@ class PhoneCallSession:
             ambience = self._next_ambience_segment(chunk_size)
             if ambience:
                 try:
+                    if not self._ambience_started_logged:
+                        self._ambience_started_logged = True
+                        self.log_event("ambience_first_audio", {"gain": PHONE_AMBIENCE_IDLE_GAIN})
                     self._send_pcm_chunk(apply_pcm16_gain(ambience, PHONE_AMBIENCE_IDLE_GAIN), ambience_gain=0.0)
                 except Exception:
                     return
@@ -5896,6 +5907,7 @@ class PhoneCallSession:
         trimmed = normalize_whitespace(text).strip()
         if not trimmed or is_likely_stt_hallucination(trimmed):
             return
+        opening_protection_active, _ = self._opening_barge_in_protection_state()
         with self._lock:
             active_response_id = self._current_response_id
             active_response_text = self._current_response_text or self._latest_assistant_text()
@@ -5907,6 +5919,8 @@ class PhoneCallSession:
         tokens = stt_word_tokens(trimmed)
         if not tokens:
             return
+        if opening_protection_active:
+            return
         if len(tokens) < 2 and speech_seconds < 0.25:
             return
         self._cancel_active_playback("barge_in_partial")
@@ -5917,6 +5931,8 @@ class PhoneCallSession:
             return
         tokens = stt_word_tokens(trimmed)
         now = time.time()
+        explicit_language_request = bool(explicit_language_request_language_id(trimmed))
+        opening_protection_active, opening_started_at = self._opening_barge_in_protection_state()
         with self._lock:
             recent_barge_in = self._pending_barge_in_at and (now - self._pending_barge_in_at < 2.0)
             last_speak_at = self._last_agent_speak_start_at
@@ -5927,6 +5943,14 @@ class PhoneCallSession:
             if looks_like_agent_echo(trimmed, active_response_text):
                 self.log_event("stt_dropped", {"reason": "agent_echo", "text": trimmed[:120]})
                 return
+            if opening_protection_active and not explicit_language_request:
+                opening_elapsed = now - opening_started_at if opening_started_at is not None else None
+                if opening_elapsed is not None and opening_elapsed < PHONE_GREETING_BARGE_IN_GRACE_SECONDS:
+                    self.log_event("stt_dropped", {"reason": "greeting_grace", "text": trimmed[:120]})
+                    return
+                if len(tokens) < 4:
+                    self.log_event("stt_dropped", {"reason": "greeting_short", "text": trimmed[:120]})
+                    return
             if not recent_barge_in and len(tokens) < 3:
                 self.log_event("stt_dropped", {"reason": "short_during_playback", "text": trimmed[:120]})
                 return

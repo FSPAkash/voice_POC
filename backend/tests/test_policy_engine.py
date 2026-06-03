@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 import json
+import time
 
 from backend import app as policy_app
 
@@ -214,6 +215,28 @@ class PolicyEngineTests(unittest.TestCase):
         session._handle_partial_transcript("yes", "en-IN")
 
         self.assertIsNone(session._current_response_id)
+
+    def test_phone_session_greeting_ignores_small_echo_interruptions(self) -> None:
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+        session._greeting_started = True
+        session.turn_number = 0
+        session._current_response_id = "utt_demo"
+        session._current_mark_name = "mark_utt_demo"
+        session._current_response_text = "Good evening, main Yogesh DHL Express India se bol raha hoon."
+        session._last_agent_speak_start_at = time.time()
+
+        session._handle_partial_transcript("hello", "en-IN")
+        session._handle_final_transcript("hello", "en-IN")
+
+        self.assertEqual(session._current_response_id, "utt_demo")
+        self.assertFalse(any(entry["role"] == "customer" for entry in session.transcript))
 
     def test_phone_session_recent_barge_in_keeps_short_final_confirmation(self) -> None:
         session = policy_app.PhoneCallSession(
