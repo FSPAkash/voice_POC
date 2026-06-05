@@ -508,7 +508,8 @@ class PolicyEngineTests(unittest.TestCase):
             "en-IN",
         )
 
-        self.assertEqual(spoken, "Invoice DHL 123456. Invoice DHL 654321")
+        # Long IDs get a comma pause so the voice does not machine-gun the digits.
+        self.assertEqual(spoken, "Invoice DHL, 123456. Invoice DHL, 654321")
 
     def test_prepare_sarvam_tts_text_preserves_number_commas(self) -> None:
         spoken = policy_app.prepare_sarvam_tts_text(

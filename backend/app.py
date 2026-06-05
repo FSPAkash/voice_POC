@@ -48,6 +48,12 @@ except ImportError as _keep_alive_import_error:
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 PROMPTS_DIR = BASE_DIR / "prompts"
+# Create the data dir at import so the first call's wrap-up write cannot fail on
+# a fresh deploy where backend/data/ does not exist yet.
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
 FRONTEND_DIST_DIR = BASE_DIR.parent / "frontend" / "dist"
 FRONTEND_INDEX_FILE = FRONTEND_DIST_DIR / "index.html"
 
@@ -137,11 +143,15 @@ REALTIME_MODEL = SARVAM_TTS_MODEL
 REALTIME_TRANSCRIPTION_MODEL = SARVAM_STT_MODEL
 SARVAM_TTS_SAMPLE_RATE = _env_int("SARVAM_TTS_SAMPLE_RATE", 24000, minimum=8000, maximum=48000)
 SARVAM_STT_SAMPLE_RATE = _env_int("SARVAM_STT_SAMPLE_RATE", 16000, minimum=8000, maximum=16000)
-# Bulbul sounds more natural for collections when nudged a touch faster and
-# less over-controlled. Keep these overridable from env for quick A/B testing.
-SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.08, minimum=0.5, maximum=2.0)
-SARVAM_TTS_PACE_ENGLISH = _env_float("SARVAM_TTS_PACE_ENGLISH", 1.16, minimum=0.5, maximum=2.0)
-SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.68, minimum=0.01, maximum=1.0)
+# Bulbul prosody. Conservative, human-leaning defaults: a slightly slower pace
+# reads less rushed/robotic, and a small temperature bump adds intonation without
+# risking instability. All overridable from env for quick A/B testing on calls.
+SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.05, minimum=0.5, maximum=2.0)
+SARVAM_TTS_PACE_ENGLISH = _env_float("SARVAM_TTS_PACE_ENGLISH", 1.10, minimum=0.5, maximum=2.0)
+SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.72, minimum=0.01, maximum=1.0)
+# Humanize spoken text (spell dates, group long numbers, light clause pauses) so
+# Bulbul does not read IDs/dates mechanically. Off -> previous behaviour.
+SARVAM_TTS_HUMANIZE = _env_flag("SARVAM_TTS_HUMANIZE", True)
 SARVAM_TTS_MIN_BUFFER_SIZE = _env_int("SARVAM_TTS_MIN_BUFFER_SIZE", 30, minimum=30, maximum=200)
 SARVAM_TTS_MAX_CHUNK_LENGTH = _env_int("SARVAM_TTS_MAX_CHUNK_LENGTH", 200, minimum=30, maximum=400)
 SARVAM_TTS_OUTPUT_CODEC = (os.environ.get("SARVAM_TTS_OUTPUT_CODEC", "linear16") or "linear16").strip().lower()
@@ -855,6 +865,10 @@ def write_json(path: Path, data: Any) -> None:
 
 
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    # Ensure the parent dir exists on demand. On a fresh deploy backend/data/ may
+    # not exist yet (it is only created in a reset/init path), which made every
+    # phone-call wrap-up write fail and silently drop the call from history.
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
@@ -1966,6 +1980,50 @@ def transliterate_latin_for_tts(text: str, language_code: str | None) -> str:
     return _LATIN_RUN_RE.sub(_replace, text)
 
 
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+_ORDINALS = {
+    1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth",
+    7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth", 11: "eleventh",
+    12: "twelfth", 13: "thirteenth", 14: "fourteenth", 15: "fifteenth",
+    16: "sixteenth", 17: "seventeenth", 18: "eighteenth", 19: "nineteenth",
+    20: "twentieth", 21: "twenty-first", 22: "twenty-second", 23: "twenty-third",
+    24: "twenty-fourth", 25: "twenty-fifth", 26: "twenty-sixth",
+    27: "twenty-seventh", 28: "twenty-eighth", 29: "twenty-ninth",
+    30: "thirtieth", 31: "thirty-first",
+}
+
+
+def _spoken_iso_date(match: re.Match[str]) -> str:
+    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return match.group(0)
+    day_word = _ORDINALS.get(day, str(day))
+    return f"{day_word} {_MONTH_NAMES[month - 1]} {year}"
+
+
+def humanize_spoken_text(text: str, language_code: str | None) -> str:
+    """Make business strings sound spoken rather than printed: spell ISO dates,
+    add a light pause around long alphanumeric IDs so they aren't rushed, and
+    avoid run-on delivery. Only applied for English/Hinglish where the spelled
+    English month/ordinal words fit naturally; native scripts keep digits (Bulbul
+    reads them correctly in-language) but still get the ID pause."""
+    code = (language_code or "").strip().lower()
+    english_like = code in {"en-in", "hi-in"}
+
+    # ISO dates -> spoken English (only when English words fit the delivery).
+    if english_like:
+        text = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b", _spoken_iso_date, text)
+
+    # Long alphanumeric IDs (e.g. DHL123456): keep the split letters+digits but
+    # add a slight comma pause so the voice doesn't machine-gun the digits.
+    text = re.sub(r"\b([A-Za-z]{2,})\s+(\d{4,})\b", r"\1, \2", text)
+
+    return text
+
+
 def prepare_sarvam_tts_text(
     text: str,
     language_code: str | None,
@@ -1985,6 +2043,10 @@ def prepare_sarvam_tts_text(
     cleaned = cleaned.replace("•", ". ")
     cleaned = re.sub(r"\s*[;|]\s*", ". ", cleaned)
     cleaned = re.sub(r"\b([A-Za-z]{2,})(\d{3,})\b", r"\1 \2", cleaned)
+
+    if SARVAM_TTS_HUMANIZE:
+        cleaned = humanize_spoken_text(cleaned, language_code)
+
     cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
     cleaned = re.sub(r"(?<!\d),(?=\S)", ", ", cleaned)
     cleaned = re.sub(r"([.!?])(?=\S)", r"\1 ", cleaned)
@@ -7101,6 +7163,10 @@ class PhoneCallSession:
         self._cancel_active_playback("call_finished")
         self.log_event("call_finished", {"reason": reason})
         if self.transcript or self.tool_calls:
+            # Summary generation is the risky (LLM) step. Isolate it so a summary
+            # failure can NEVER prevent the call from being logged to the wrap-up
+            # dashboard. Previously a throw here (or below) was swallowed and the
+            # whole phone call silently vanished from history.
             try:
                 summary, usage, error = create_call_summary(
                     {
@@ -7115,12 +7181,17 @@ class PhoneCallSession:
                     self.summary = summary
                 if usage:
                     record_supervisor_usage(SUPERVISOR_MODEL, usage)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 self.summary = None
+                self.log_event("call_summary_error", {"message": str(exc)[:200]})
             try:
                 started_at = self.started_at or self.created_at
                 duration_sec = max(0, int((self.ended_at - started_at).total_seconds()))
-                costs = ledger_with_combined(load_ledger())
+                try:
+                    costs = ledger_with_combined(load_ledger())
+                except Exception as exc:  # noqa: BLE001
+                    self.log_event("call_log_cost_error", {"message": str(exc)[:200]})
+                    costs = {"combined": {"estimated_cost_usd": 0.0, "total_tokens": 0}}
                 log_payload = {
                     "account_number": self.account_number,
                     "disposition": self.disposition,
@@ -7159,8 +7230,13 @@ class PhoneCallSession:
                     "timestamp": utc_now_iso(),
                 }
                 append_jsonl(CALL_LOG_FILE, entry)
-            except Exception:
-                pass
+                self.log_event("call_logged", {"id": entry["id"], "path": str(CALL_LOG_FILE)})
+            except Exception as exc:  # noqa: BLE001
+                # Never silently drop a completed call from the wrap-up history.
+                self.log_event(
+                    "call_log_error",
+                    {"message": str(exc)[:200], "path": str(CALL_LOG_FILE)},
+                )
 
 
 def get_phone_call_session(*, session_id: str | None = None, call_sid: str | None = None) -> PhoneCallSession | None:
