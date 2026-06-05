@@ -223,6 +223,24 @@ PHONE_LANGUAGE_SWITCH_CONFIRM_WINDOW_SECONDS = _env_float(
     minimum=1.0,
     maximum=20.0,
 )
+# Stickiness gate: a language SWITCH that rests on weak evidence (Sarvam STT
+# confidence below this, or a switch with no script signal) must be corroborated
+# by a second consistent turn before we flip the call language. Prevents a single
+# misrecognized utterance from hijacking the whole call (the Tamil-misfire bug).
+# This is pure local logic on results already received — it adds NO latency, it
+# can only defer a low-confidence switch by one turn. Set to 0 to disable.
+PHONE_LANGUAGE_SWITCH_MIN_CONFIDENCE = _env_float(
+    "PHONE_LANGUAGE_SWITCH_MIN_CONFIDENCE",
+    0.55,
+    minimum=0.0,
+    maximum=1.0,
+)
+# Switch reasons strong enough to bypass the corroboration gate even at low/absent
+# confidence: clear native-script evidence, or the customer literally naming a
+# language. These were never the misfire source.
+PHONE_TRUSTED_SWITCH_REASONS = frozenset(
+    {"strong_script_switch", "explicit_request", "plain_english"}
+)
 
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
@@ -1535,21 +1553,71 @@ _MARATHI_WHOLE_WORD_ONLY = frozenset(
 )
 
 
-def looks_like_marathi(text: str) -> bool:
+# High-frequency Hindi tokens that are NOT standard Marathi. Used to detect a
+# switch BACK to Hindi while the active language is Marathi (both Devanagari).
+# Without this, plain Hindi sticks to Marathi forever once Marathi is active.
+HINDI_SCRIPT_MARKERS = (
+    "है",            # hai (is; Marathi आहे)
+    "हैं",           # hain (are)
+    "हूँ",           # hoon
+    "हूं",           # hoon (alt)
+    "नहीं",          # nahin (no; Marathi नाही)
+    "क्या",          # kya (what; Marathi काय)
+    "क्यों",         # kyun (why)
+    "और",            # aur (and; Marathi आणि)
+    "रहा",           # raha
+    "रही",           # rahi
+    "रहे",           # rahe
+    "मैं",           # main (I; Marathi मी)
+    "आप",            # aap (you; Marathi तुम्ही)
+    "आपको",          # aapko
+    "करो",           # karo (do; Marathi करा)
+    "बताओ",          # batao (tell; Marathi सांगा)
+    "चलो",           # chalo (let's; Marathi चला)
+    "हुआ",           # hua
+    "गया",           # gaya
+    "वापस",          # vaapas (back)
+    "कब",            # kab (when; Marathi केव्हा)
+    "कितना",         # kitna (how much; Marathi किती)
+    "कहाँ",          # kahan (where; Marathi कुठे)
+    "ठीक",           # theek (ok) -- shared but very common in Hindi
+    "को",            # ko (postposition; Marathi requires whole-word guard)
+    "का",            # ka
+    "की",            # ki
+    "के",            # ke
+    "में",           # mein (in; Marathi मध्ये)
+    "से",            # se (from)
+)
+_HINDI_WHOLE_WORD_ONLY = frozenset({m for m in HINDI_SCRIPT_MARKERS if len(m) <= 3})
+
+
+def _marker_hits(text: str, markers: tuple[str, ...], whole_word_only: frozenset[str]) -> int:
     lowered = normalize_whitespace(text).casefold()
     if not lowered:
-        return False
-    # Split on anything that is not a Devanagari/Latin letter so we compare
-    # whole tokens. Devanagari has no case, so casefold is a harmless no-op.
+        return 0
     tokens = set(re.split(r"[^ऀ-ॿa-z]+", lowered))
     tokens.discard("")
-    for marker in MARATHI_SCRIPT_MARKERS:
-        if marker in _MARATHI_WHOLE_WORD_ONLY:
+    hits = 0
+    for marker in markers:
+        if marker in whole_word_only:
             if marker in tokens:
-                return True
+                hits += 1
         elif marker in lowered:
-            return True
-    return False
+            hits += 1
+    return hits
+
+
+def looks_like_marathi(text: str) -> bool:
+    return _marker_hits(text, MARATHI_SCRIPT_MARKERS, _MARATHI_WHOLE_WORD_ONLY) > 0
+
+
+def looks_like_hindi(text: str) -> bool:
+    """True when Devanagari text carries Hindi-specific markers and is not
+    Marathi. Used to break the Hindi/Marathi tie in language_id_for_script."""
+    return (
+        _marker_hits(text, HINDI_SCRIPT_MARKERS, _HINDI_WHOLE_WORD_ONLY) > 0
+        and not looks_like_marathi(text)
+    )
 
 def has_indic_script(text: str) -> bool:
     for ch in text:
@@ -1599,6 +1667,11 @@ def language_id_for_script(text: str, current_language_id: str | None, preferred
         if 0x0900 <= codepoint <= 0x097F:
             if looks_like_marathi(text):
                 return "marathi"
+            # Break the Hindi/Marathi tie BEFORE sticking to current: a Hindi
+            # utterance while Marathi is active must switch back to Hindi, not be
+            # absorbed as "still Marathi". This was the marathi->hindi stuck bug.
+            if looks_like_hindi(text):
+                return "hindi"
             if current in {"hindi", "marathi", "nepali", "konkani", "maithili", "sanskrit", "dogri", "bodo"}:
                 return current
             if preferred in {"hindi", "marathi", "nepali", "konkani", "maithili", "sanskrit", "dogri", "bodo"}:
@@ -1755,6 +1828,22 @@ def supported_render_language_id(language_id: str | None) -> str:
 
 def normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _coerce_confidence(value: Any) -> float | None:
+    """Normalize a Sarvam confidence value to a 0..1 float, or None if absent /
+    unparseable. Accepts numbers (0..1 or 0..100) and string labels."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        conf = float(value)
+        if conf > 1.0:  # some APIs report 0..100
+            conf = conf / 100.0
+        return max(0.0, min(1.0, conf))
+    label = str(value).strip().lower()
+    return {"high": 0.95, "medium": 0.6, "low": 0.3}.get(label)
 
 
 # Language codes that render in a native (non-Latin) script. Latin runs fed to
@@ -2614,6 +2703,24 @@ def generate_collections_reply(
         if language_id in {"hinglish", "hindi"}:
             return (
                 f"Theek hai, ek-ek karke batata hoon. {line} Iske liye payment kab tak release hogi?",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "marathi":
+            return (
+                f"ठीक आहे, एक-एक करून सांगतो. {line} याची payment तारीख सांगू शकता का?",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "bengali":
+            return (
+                f"ঠিক আছে, একটা একটা করে বলছি। {line} এর payment তারিখ জানাতে পারবেন?",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "tamil":
+            return (
+                f"சரி, ஒவ்வொன்றாக சால்கிறேன். {line} இதற்கான payment தேதியை உறுதி செய்ய முடியுமா?",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
@@ -6587,6 +6694,18 @@ class PhoneCallSession:
                 or payload.get("detected_language_code")
                 or sarvam_language_code(self.active_language_id)
             )
+            # Sarvam may report a numeric confidence for the detected language /
+            # transcript. Absent on many frames; we treat missing as "unknown"
+            # and fall back to evidence-strength heuristics in the switch gate.
+            detected_confidence = _coerce_confidence(
+                data.get("language_confidence")
+                if data.get("language_confidence") is not None
+                else data.get("confidence")
+                if data.get("confidence") is not None
+                else payload.get("language_confidence")
+                if payload.get("language_confidence") is not None
+                else payload.get("confidence")
+            )
             if ptype == "error":
                 message = str(data.get("message") or "Sarvam STT upstream error")[:300]
                 self._append_transcript("system", f"Sarvam STT error: {message}")
@@ -6615,7 +6734,7 @@ class PhoneCallSession:
                         )
                     except Exception:
                         pass
-                self._handle_final_transcript(text, str(detected))
+                self._handle_final_transcript(text, str(detected), detected_confidence)
 
     def forward_audio(self, pcm_bytes: bytes) -> None:
         if not pcm_bytes:
@@ -6680,7 +6799,9 @@ class PhoneCallSession:
             return
         self._cancel_active_playback("barge_in_partial")
 
-    def _handle_final_transcript(self, text: str, detected_code: str) -> None:
+    def _handle_final_transcript(
+        self, text: str, detected_code: str, detected_confidence: float | None = None
+    ) -> None:
         trimmed = normalize_whitespace(text).strip()
         if not trimmed:
             return
@@ -6753,6 +6874,38 @@ class PhoneCallSession:
             # continue in a language we can actually speak back.
             self._reprompt_after_unspeakable_turn(drop_reason)
             return
+
+        # Stickiness gate: defer a language `switch` for one corroborating turn
+        # when the evidence is weak, so a single misrecognized utterance cannot
+        # hijack the call language (the Tamil-misfire bug). No latency cost — it
+        # only delays an uncertain switch by one turn; replies/audio are unaffected.
+        #
+        # A switch is gated when EITHER:
+        #   - Sarvam reports a confidence below the floor, OR
+        #   - confidence is absent AND the evidence is thin: an untrusted reason,
+        #     or a trusted reason carried by a very short utterance (<= 2 tokens),
+        #     which is exactly how the Tamil misfire slipped through.
+        signal_reason = str(language_signal.get("reason") or "")
+        if signal_action == "switch" and PHONE_LANGUAGE_SWITCH_MIN_CONFIDENCE > 0 and (
+            signal_candidate != supported_render_language_id(self.active_language_id)
+        ):
+            trusted_reason = signal_reason in PHONE_TRUSTED_SWITCH_REASONS
+            if detected_confidence is not None:
+                weak = detected_confidence < PHONE_LANGUAGE_SWITCH_MIN_CONFIDENCE
+            else:
+                weak = (not trusted_reason) or len(tokens) <= 2
+            if weak:
+                signal_action = "tentative"
+                self.log_event(
+                    "language_switch_gated",
+                    {
+                        "candidate": signal_candidate,
+                        "reason": signal_reason,
+                        "confidence": detected_confidence,
+                        "tokens": len(tokens),
+                    },
+                )
+
         if signal_action == "tentative" and signal_candidate != supported_render_language_id(self.active_language_id):
             if not self._confirm_tentative_language_candidate(signal_candidate):
                 self.log_event(
