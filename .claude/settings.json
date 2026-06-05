@@ -47,7 +47,14 @@
       "Bash(python -m pytest backend/tests/ -q)",
       "Bash(grep -rn \"SARVAM_TTS_PACE\" --include=\"*.env*\" --include=\".env\" .)",
       "Bash(ls -la backend/.env*)",
-      "Bash(ls -la .env*)"
+      "Bash(ls -la .env*)",
+      "Bash(python -c \"import backend.app\")",
+      "Bash(python -c \"import os; print\\('shell env TEMP:', os.environ.get\\('SARVAM_TTS_TEMPERATURE'\\)\\); print\\('shell env PACE:', os.environ.get\\('SARVAM_TTS_PACE'\\)\\)\")",
+      "Bash(grep -in \"temperature\\\\|tts_pace\\\\|tts_temp\" backend/.env)",
+      "Bash(python -c \"import app; print\\('module SARVAM_TTS_TEMPERATURE =', app.SARVAM_TTS_TEMPERATURE\\)\")",
+      "Bash(python -c \"import app; print\\('TEMP default in module:', app.SARVAM_TTS_TEMPERATURE\\)\")",
+      "Bash(find . -name \".env*\" -not -path \"*/node_modules/*\")",
+      "Bash(grep -rin \"temperature\" --include=\".env*\" .)"
     ],
     "additionalDirectories": [
       "c:\\Users\\AkashPatil\\.claude\\projects\\c--Users-AkashPatil-DHL-POC\\memory"

@@ -150,6 +150,8 @@ SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.05, minimum=0.5, maximum=2.0)
 # English/aditya read slow at 1.10; 1.2 keeps a natural brisk-but-clear pace.
 SARVAM_TTS_PACE_ENGLISH = _env_float("SARVAM_TTS_PACE_ENGLISH", 1.2, minimum=0.5, maximum=2.0)
 SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.72, minimum=0.01, maximum=1.0)
+# English/aditya sounds flat; a higher temperature adds intonation/expressiveness.
+SARVAM_TTS_TEMPERATURE_ENGLISH = _env_float("SARVAM_TTS_TEMPERATURE_ENGLISH", 0.85, minimum=0.01, maximum=1.0)
 # Humanize spoken text (spell dates, group long numbers, light clause pauses) so
 # Bulbul does not read IDs/dates mechanically. Off -> previous behaviour.
 SARVAM_TTS_HUMANIZE = _env_flag("SARVAM_TTS_HUMANIZE", True)
@@ -253,6 +255,27 @@ PHONE_TRUSTED_SWITCH_REASONS = frozenset(
     {"strong_script_switch", "explicit_request", "plain_english"}
 )
 
+# Thinking filler: when a turn takes longer than this to produce a reply (the slow
+# LLM path), speak a short "let me check" phrase so the customer hears the agent
+# is working rather than dead air / only ambience. Cancelled the moment the real
+# reply starts. Set delay to 0 to disable.
+PHONE_THINKING_FILLER_DELAY_SECONDS = _env_float(
+    "PHONE_THINKING_FILLER_DELAY_SECONDS",
+    0.9,
+    minimum=0.0,
+    maximum=5.0,
+)
+# Per-language short filler phrases. Kept very short so they never collide with
+# the real reply for long. English avoids over-formality.
+PHONE_THINKING_FILLER_PHRASES: dict[str, str] = {
+    "english": "Let me just check that for you.",
+    "hinglish": "Ek second, main check karta hoon.",
+    "hindi": "एक सेकंड, मैं देख लेता हूँ।",
+    "marathi": "एक मिनिट, मी बघतो.",
+    "bengali": "এক সেকেন্ড, আমি দেখে নিচ্ছি।",
+    "tamil": "ஒரு நிமிடம், நான் பார்க்கிறேன்.",
+}
+
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
 VOICE_PERSONAS: dict[str, dict[str, str]] = {
@@ -345,6 +368,16 @@ def sarvam_tts_pace(language_code: str | None, voice: str | None) -> float:
     return SARVAM_TTS_PACE
 
 
+def sarvam_tts_temperature(language_code: str | None, voice: str | None) -> float:
+    """English (aditya) reads flat; a higher temperature adds intonation so it
+    sounds less robotic. Native voices keep the steadier default for stability."""
+    normalized_language = (language_code or "").strip().lower()
+    localized_voice = localized_sarvam_voice(voice, language_code)
+    if normalized_language == "en-in" or localized_voice == "aditya":
+        return SARVAM_TTS_TEMPERATURE_ENGLISH
+    return SARVAM_TTS_TEMPERATURE
+
+
 # App language_id -> Sarvam BCP-47 code.
 SARVAM_LANGUAGE_CODES: dict[str, str] = {
     "english": "en-IN",
@@ -381,7 +414,7 @@ def sarvam_tts_options(language_code: str, voice: str) -> dict[str, Any]:
         "model": SARVAM_TTS_MODEL,
         "speech_sample_rate": SARVAM_TTS_SAMPLE_RATE,
         "pace": sarvam_tts_pace(language_code, voice),
-        "temperature": SARVAM_TTS_TEMPERATURE,
+        "temperature": sarvam_tts_temperature(language_code, voice),
     }
     if SARVAM_TTS_DICT_ID:
         options["dict_id"] = SARVAM_TTS_DICT_ID
@@ -2954,24 +2987,42 @@ def generate_collections_reply(
         )
 
     if signals["dispute"]:
-        args = {
-            "invoice_no": target_invoice.get("invoice_no"),
-            "reason": customer_text,
-            "undisputed_amount": None,
-        }
-        result = run_tool("log_dispute", args)
-        tool_calls.append(build_tool_call_entry("log_dispute", args, result))
-        if language_id in {"hinglish", "hindi"}:
-            return (
-                "Samajh gaya. Main isko dispute ke taur par log kar raha hoon aur concerned team ko bhej diya jayega. "
-                "Agar koi undisputed amount hai, kya aap woh meanwhile clear kar sakte hain?"
-            , tool_calls, DETERMINISTIC_CHAT_MODEL)
-        return (
-            "I understand your concern. I have logged this as a dispute and it will be routed to the concerned team. "
-            "If there is any undisputed amount, could you clear that in the meantime?",
-            tool_calls,
-            DETERMINISTIC_CHAT_MODEL,
+        invoice_no = target_invoice.get("invoice_no")
+        # Dedup: do not log the same invoice's dispute again if it was already
+        # logged earlier in this call. The customer often re-states the dispute
+        # across several turns; without this we logged duplicate disputes (and
+        # repeated the identical reply) on every restatement.
+        already_logged = any(
+            isinstance(tc, dict)
+            and tc.get("name") == "log_dispute"
+            and (tc.get("args") or {}).get("invoice_no") == invoice_no
+            for tc in (prior_tool_calls or [])
+        ) or any(
+            isinstance(tc, dict)
+            and tc.get("name") == "log_dispute"
+            and (tc.get("args") or {}).get("invoice_no") == invoice_no
+            for tc in tool_calls
         )
+        if not already_logged:
+            args = {
+                "invoice_no": invoice_no,
+                "reason": customer_text,
+                "undisputed_amount": None,
+            }
+            result = run_tool("log_dispute", args)
+            tool_calls.append(build_tool_call_entry("log_dispute", args, result))
+        ack = {
+            "hinglish": "Samajh gaya. Main isko dispute ke taur par log kar raha hoon aur concerned team ko bhej diya jayega. Agar koi undisputed amount hai, kya aap woh meanwhile clear kar sakte hain?",
+            "hindi": "Samajh gaya. Main isko dispute ke taur par log kar raha hoon aur concerned team ko bhej diya jayega. Agar koi undisputed amount hai, kya aap woh meanwhile clear kar sakte hain?",
+            "marathi": "समजलं. मी हे dispute म्हणून log करतो आणि संबंधित team कडे पाठवतो. जर काही undisputed amount असेल, तर तुम्ही ती दरम्यान clear करू शकता का?",
+            "bengali": "বুঝেছি। আমি এটি dispute হিসেবে log করছি এবং সংশ্লিষ্ট team-এর কাছে পাঠানো হবে। যদি কোনো undisputed amount থাকে, আপনি কি সেটি এর মধ্যে clear করতে পারবেন?",
+            "tamil": "புரிகிறது. நான் இதை dispute-ஆக log செய்கிறேன், சம்பந்தப்பட்ட team-க்கு அனுப்பப்படும். ஏதேனும் undisputed amount இருந்தால், அதை இதற்கிடையில் clear செய்ய முடியுமா?",
+        }
+        message = ack.get(
+            language_id,
+            "Got it, thanks for flagging that. I've logged it as a dispute and it'll go to the concerned team. If there's any undisputed amount, could you clear that in the meantime?",
+        )
+        return (message, tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if signals["payment_options"]:
         extra = (
@@ -6115,6 +6166,7 @@ class PhoneCallSession:
         self._pending_language_candidate: str | None = None
         self._pending_language_candidate_at: float | None = None
         self._last_unspeakable_reprompt_at: float | None = None
+        self._thinking_filler_timer: threading.Timer | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -6454,6 +6506,50 @@ class PhoneCallSession:
         except Exception:
             pass
 
+    def _schedule_thinking_filler(self, revision: int) -> None:
+        """Arm a short 'let me check' phrase to play if this turn is still
+        thinking after the delay. Keeps the line alive on slow LLM turns."""
+        if PHONE_THINKING_FILLER_DELAY_SECONDS <= 0:
+            return
+        with self._lock:
+            existing = self._thinking_filler_timer
+            if existing is not None:
+                existing.cancel()
+            timer = threading.Timer(
+                PHONE_THINKING_FILLER_DELAY_SECONDS,
+                self._emit_thinking_filler,
+                args=(revision,),
+            )
+            timer.daemon = True
+            self._thinking_filler_timer = timer
+        timer.start()
+
+    def _cancel_thinking_filler(self) -> None:
+        with self._lock:
+            timer = self._thinking_filler_timer
+            self._thinking_filler_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _emit_thinking_filler(self, revision: int) -> None:
+        with self._lock:
+            self._thinking_filler_timer = None
+            if self._stop or not self.stream_sid:
+                return
+            # Only fill if the turn is still the current one and nothing is
+            # already speaking (real reply not started, no barge-in pending).
+            if revision != self._customer_revision:
+                return
+            if self._current_response_id or self._current_mark_name:
+                return
+        active = supported_render_language_id(self.active_language_id)
+        phrase = PHONE_THINKING_FILLER_PHRASES.get(
+            self.active_language_id,
+            PHONE_THINKING_FILLER_PHRASES.get(active, PHONE_THINKING_FILLER_PHRASES["english"]),
+        )
+        self.log_event("thinking_filler", {"language": active, "revision": revision})
+        self._speak_reply(phrase, is_filler=True)
+
     def _reprompt_after_unspeakable_turn(self, drop_reason: str) -> None:
         """Speak a short nudge when we had to drop the customer's turn (e.g. they
         spoke a language we cannot render) so the call does not stall into silence.
@@ -6481,7 +6577,7 @@ class PhoneCallSession:
         message = prompts.get(active, prompts["english"])
         self._speak_reply(message)
 
-    def _speak_reply(self, text: str) -> None:
+    def _speak_reply(self, text: str, *, is_filler: bool = False) -> None:
         normalized = normalize_whitespace(text).strip()
         if not normalized:
             return
@@ -6498,8 +6594,14 @@ class PhoneCallSession:
             self._current_mark_name = mark_name
             self._current_response_text = normalized
             self._last_agent_speak_start_at = time.time()
-        self._append_transcript("assistant", normalized, entry_id=f"assistant_{response_id}")
-        self.log_event("assistant_reply", {"utterance_id": response_id, "text": normalized})
+        # Filler phrases are spoken but NOT added to the transcript/history, so
+        # they never pollute the summary or the LLM's view of the conversation.
+        if not is_filler:
+            self._append_transcript("assistant", normalized, entry_id=f"assistant_{response_id}")
+        self.log_event(
+            "assistant_reply" if not is_filler else "assistant_filler",
+            {"utterance_id": response_id, "text": normalized},
+        )
         threading.Thread(
             target=self._render_and_send_tts,
             args=(serial, response_id, mark_name, normalized),
@@ -7037,6 +7139,10 @@ class PhoneCallSession:
         if not self._is_customer_revision_current(revision):
             self.log_event("turn_processing_dropped", {"reason": "stale_before_start", "revision": revision})
             return
+        # Arm the thinking filler. It only actually speaks if this turn is still
+        # in flight after the delay (the slow LLM path); the fast deterministic
+        # path finishes in ~2ms and cancels it well before it fires.
+        self._schedule_thinking_filler(revision)
         advice, _, lc_error = create_language_coach_review(
             {
                 "transcript": transcript_text,
@@ -7046,10 +7152,12 @@ class PhoneCallSession:
             }
         )
         if lc_error:
+            self._cancel_thinking_filler()
             self._append_transcript("system", f"Language coach error: {lc_error}")
             return
         next_language_id = supported_render_language_id(advice.get("suggested_language_id") or self.active_language_id)
         if not self._is_customer_revision_current(revision):
+            self._cancel_thinking_filler()
             self.log_event("turn_processing_dropped", {"reason": "stale_after_language_coach", "revision": revision})
             return
         with self._lock:
@@ -7070,6 +7178,7 @@ class PhoneCallSession:
                 record_chat_agent_usage(CHAT_MODEL, usage)
             except Exception:
                 pass
+        self._cancel_thinking_filler()
         if not self._is_customer_revision_current(revision):
             self.log_event("turn_processing_dropped", {"reason": "stale_after_chat", "revision": revision})
             return
@@ -7172,6 +7281,7 @@ class PhoneCallSession:
             self._cancel_playback_finish_timer_locked()
         if timer is not None:
             timer.cancel()
+        self._cancel_thinking_filler()
         self._close_stt_upstream(reset_billing=True)
         self._cancel_active_playback("call_finished")
         self.log_event("call_finished", {"reason": reason})
