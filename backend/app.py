@@ -153,6 +153,27 @@ SARVAM_STT_MODE = (os.environ.get("SARVAM_STT_MODE", "codemix") or "codemix").st
 if SARVAM_STT_MODE not in {"transcribe", "translate", "verbatim", "translit", "codemix"}:
     SARVAM_STT_MODE = "codemix"
 
+# When the TTS language is a native (non-English) script, Latin-script words in
+# the agent reply make Bulbul mispronounce. We transliterate those Latin runs
+# into the target script via Sarvam's transliterate API before synthesis. This
+# is a hard backstop independent of whether the LLM obeyed the native-script
+# instruction. Disable with SARVAM_TTS_TRANSLITERATE=0.
+SARVAM_TTS_TRANSLITERATE = _env_flag("SARVAM_TTS_TRANSLITERATE", True)
+# Brand / business tokens we deliberately keep in Latin even in native modes
+# (Bulbul says these acceptably in-context; transliterating them mangles them).
+# Matched case-insensitively as whole words.
+SARVAM_TTS_LATIN_ALLOWLIST = frozenset(
+    tok.strip().casefold()
+    for tok in (
+        os.environ.get(
+            "SARVAM_TTS_LATIN_ALLOWLIST",
+            "DHL,MyBill,DHL Express,INR,Express,India,OK,email,id,no",
+        )
+        or ""
+    ).split(",")
+    if tok.strip()
+)
+
 EXOTEL_ACCOUNT_SID = _strip_matching_quotes(os.environ.get("EXOTEL_ACCOUNT_SID", ""))
 EXOTEL_API_KEY = _strip_matching_quotes(os.environ.get("EXOTEL_API_KEY", ""))
 EXOTEL_API_TOKEN = _strip_matching_quotes(os.environ.get("EXOTEL_API_TOKEN", ""))
@@ -172,7 +193,27 @@ PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 2.2, minimum=0
 PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.3, minimum=0.0, maximum=4.0)
 PHONE_AMBIENCE_TARGET_RMS = _env_float("PHONE_AMBIENCE_TARGET_RMS", 2400.0, minimum=200.0, maximum=6000.0)
 PHONE_AMBIENCE_MAX_NORMALIZE_GAIN = _env_float("PHONE_AMBIENCE_MAX_NORMALIZE_GAIN", 8.0, minimum=1.0, maximum=12.0)
-PHONE_AMBIENCE_FILE = BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav"
+def _resolve_phone_ambience_file() -> Path:
+    """Locate the call-center ambience WAV. Prefer an explicit override, then a
+    backend-local copy (ships with the backend deploy), then the frontend asset
+    (present only in a co-located dev checkout). The frontend path alone is NOT
+    safe in production: a backend-only deploy has no frontend/ dir, so the file
+    silently goes missing and the phone gets dead air instead of ambience."""
+    override = (os.environ.get("PHONE_AMBIENCE_FILE", "") or "").strip()
+    candidates = [Path(override)] if override else []
+    candidates += [
+        BASE_DIR / "assets" / "call_center_background.wav",
+        BASE_DIR / "data" / "call_center_background.wav",
+        BASE_DIR.parent / "frontend" / "public" / "sound" / "call_center_background.wav",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    # Return the backend-local path even if absent so logs point somewhere sane.
+    return candidates[0] if override else (BASE_DIR / "assets" / "call_center_background.wav")
+
+
+PHONE_AMBIENCE_FILE = _resolve_phone_ambience_file()
 PHONE_GREETING_BARGE_IN_GRACE_SECONDS = _env_float("PHONE_GREETING_BARGE_IN_GRACE_SECONDS", 1.6, minimum=0.0, maximum=5.0)
 PHONE_LANGUAGE_SWITCH_CONFIRM_WINDOW_SECONDS = _env_float(
     "PHONE_LANGUAGE_SWITCH_CONFIRM_WINDOW_SECONDS",
@@ -709,12 +750,41 @@ DEFAULT_LANGUAGE_ID = (
     else "hinglish"
 )
 LANGUAGE_REQUEST_ALIASES: dict[str, tuple[str, ...]] = {
-    "english": ("english", "angrezi", "inglish"),
+    "english": (
+        "english", "angrezi", "angreji", "inglish", "ingriz",
+        "\u0907\u0902\u0917\u094d\u0932\u093f\u0936",  # inglish (Devanagari)
+        "\u0905\u0902\u0917\u094d\u0930\u0947\u091c\u0940",  # angreji (Devanagari)
+        "\u0b86\u0b99\u0bcd\u0b95\u0bbf\u0bb2\u0bae\u0bcd",  # aangilam (Tamil)
+        "\u0987\u0982\u09b0\u09c7\u099c\u09bf",  # ingreji (Bengali)
+    ),
     "hinglish": ("hinglish",),
-    "hindi": ("hindi", "hindee", "hindhi"),
-    "bengali": ("bengali", "bangla", "bangali"),
-    "marathi": ("marathi", "marati", "\u092e\u0930\u093e\u0920\u0940"),
-    "tamil": ("tamil", "thamizh", "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", "\u0ba4\u0bae\u0bbf\u0bb4"),
+    "hindi": (
+        "hindi", "hindee", "hindhi",
+        "\u0939\u093f\u0902\u0926\u0940",  # hindi (Devanagari)
+        "\u0939\u093f\u0928\u094d\u0926\u0940",  # hindi (alt spelling)
+        "\u0bb9\u0bbf\u0ba8\u0bcd\u0ba4\u0bbf",  # hindi (Tamil)
+        "\u09b9\u09bf\u09a8\u09cd\u09a6\u09bf",  # hindi (Bengali)
+    ),
+    "bengali": (
+        "bengali", "bangla", "bangali", "bengoli",
+        "\u09ac\u09be\u0982\u09b2\u09be",  # bangla (Bengali)
+        "\u09ac\u09be\u0999\u09be\u09b2\u09bf",  # bangali (Bengali)
+        "\u092c\u0902\u0917\u093e\u0932\u0940",  # bangali (Devanagari)
+        "\u092c\u093e\u0902\u0917\u094d\u0932\u093e",  # bangla (Devanagari)
+    ),
+    "marathi": (
+        "marathi", "marati", "maraathi",
+        "\u092e\u0930\u093e\u0920\u0940",  # marathi (Devanagari)
+        "\u092e\u0930\u093e\u0920\u093f",  # marathi (alt)
+    ),
+    "tamil": (
+        "tamil", "thamizh", "tamizh", "thamil",
+        "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd",  # tamizh (Tamil)
+        "\u0ba4\u0bae\u0bbf\u0bb4",  # tamil (Tamil, no virama)
+        "\u0924\u092e\u093f\u0933\u094d",  # tamil (Devanagari)
+        "\u0924\u092e\u093f\u0933",  # tamil (Devanagari)
+        "\u0924\u092e\u093f\u0932",  # tamil (Devanagari, l-variant)
+    ),
 }
 
 # Supported scripts include Latin plus scripts used by Indian languages in the selector.
@@ -1400,13 +1470,66 @@ ROMANIZED_INDIC_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# High-frequency Marathi tokens that do NOT appear in standard Hindi. Used to
+# split Marathi from Hindi when both share the Devanagari block. Keep these
+# Marathi-exclusive: avoid words that are also common Hindi (e.g. \u0939\u0948, \u092e\u0947\u0902, \u0914\u0930).
 MARATHI_SCRIPT_MARKERS = (
-    "\u0906\u0939\u0947",
-    "\u0906\u0939\u0947\u0924",
-    "\u0924\u0941\u092e\u094d\u0939\u0940",
-    "\u092e\u0932\u093e",
-    "\u0938\u093e\u0902\u0917\u093e",
-    "\u092d\u0930\u0923\u093e",
+    # copula / existence (Marathi \u0906\u0939\u0947-family; Hindi uses \u0939\u0948/\u0939\u0948\u0902)
+    "\u0906\u0939\u0947",          # aahe (is)
+    "\u0906\u0939\u0947\u0924",    # aahet (are)
+    "\u0906\u0939\u0947\u0938",    # aahes
+    "\u0906\u0939\u0947\u0924\u093e",  # aaheta
+    "\u0928\u093e\u0939\u0940",    # naahi (no/not; Hindi \u0928\u0939\u0940\u0902)
+    "\u0928\u093e\u0939\u0940\u092f\u0947",  # naahiye
+    "\u0939\u094b\u0924\u093e",    # hota (was)
+    "\u0939\u094b\u0924\u0940",    # hoti
+    "\u0939\u094b\u0924\u0947",    # hote
+    "\u0939\u094b\u0908\u0932",    # hoil (will be)
+    # pronouns (Marathi-specific forms)
+    "\u0924\u0941\u092e\u094d\u0939\u0940",  # tumhi (you, formal)
+    "\u0906\u092a\u0923",          # aapan (we/you incl.)
+    "\u0906\u092e\u094d\u0939\u0940",  # aamhi (we)
+    "\u092e\u0940",                # mi (I; Hindi \u092e\u0948\u0902)
+    "\u0924\u094b",                # to (he)  -- note: short, kept for ratio with others
+    "\u0924\u094d\u092f\u093e\u0902\u0928\u0940",  # tyanni
+    "\u092e\u0932\u093e",          # mala (to me)
+    "\u0924\u0941\u092e\u094d\u0939\u093e\u0932\u093e",  # tumhala (to you)
+    "\u0906\u092a\u0932\u094d\u092f\u093e",  # aaplya
+    # common verbs / question words
+    "\u0915\u093e\u092f",          # kaay (what; Hindi \u0915\u094d\u092f\u093e)
+    "\u0915\u0938\u0947",          # kase (how)
+    "\u0915\u0938\u0902",          # kasan
+    "\u0915\u093f\u0924\u0940",    # kiti (how much; Hindi \u0915\u093f\u0924\u0928\u093e)
+    "\u0915\u0941\u0920\u0947",    # kuthe (where; Hindi \u0915\u0939\u093e\u0901)
+    "\u0915\u0947\u0935\u094d\u0939\u093e",  # kevha (when)
+    "\u0938\u093e\u0902\u0917\u093e",  # sanga (tell)
+    "\u0938\u093e\u0902\u0917\u093f\u0924\u0932\u0902",  # sangitla
+    "\u0915\u0930\u0924\u094b",    # karto (do, masc)
+    "\u0915\u0930\u0924\u0947",    # karte (do, fem)
+    "\u0915\u0930\u0924\u094b\u092f",  # kartoy
+    "\u0926\u0947\u0924\u094b",    # deto
+    "\u092a\u093e\u0939\u093f\u091c\u0947",  # pahije (need/want)
+    "\u092d\u0930\u0923\u093e",    # bharna (to pay/fill)
+    "\u092d\u0930\u0924\u094b",    # bharto
+    "\u091d\u093e\u0932\u0902",    # zhala (done)
+    "\u091d\u093e\u0932\u0940",    # zhali
+    "\u091c\u093e\u0938\u094d\u0924",  # jaast (more)
+    # postpositions / connectives distinctive to Marathi
+    "\u091a",                      # cha (emphatic particle)
+    "\u0928\u0902\u0924\u0930",    # nantar (after)
+    "\u092e\u094d\u0939\u0923\u091c\u0947",  # mhanje (meaning)
+    "\u092e\u094d\u0939\u0923\u0942\u0928",  # mhanun (so/because)
+    "\u0906\u0924\u093e",          # aata (now; Hindi \u0905\u092d\u0940 differs)
+    "\u092a\u0923",                # pan (but)
+    "\u0906\u0923\u093f",          # aani (and; Hindi \u0914\u0930)
+)
+
+
+# Markers short enough to appear as substrings inside unrelated Hindi words
+# (e.g. "च" inside "अच्छा", "मी" inside "मीटिंग"). These must match as whole
+# tokens only, never as substrings, to avoid mislabelling Hindi as Marathi.
+_MARATHI_WHOLE_WORD_ONLY = frozenset(
+    {m for m in MARATHI_SCRIPT_MARKERS if len(m) <= 3}
 )
 
 
@@ -1414,7 +1537,17 @@ def looks_like_marathi(text: str) -> bool:
     lowered = normalize_whitespace(text).casefold()
     if not lowered:
         return False
-    return any(marker in lowered for marker in MARATHI_SCRIPT_MARKERS)
+    # Split on anything that is not a Devanagari/Latin letter so we compare
+    # whole tokens. Devanagari has no case, so casefold is a harmless no-op.
+    tokens = set(re.split(r"[^ऀ-ॿa-z]+", lowered))
+    tokens.discard("")
+    for marker in MARATHI_SCRIPT_MARKERS:
+        if marker in _MARATHI_WHOLE_WORD_ONLY:
+            if marker in tokens:
+                return True
+        elif marker in lowered:
+            return True
+    return False
 
 def has_indic_script(text: str) -> bool:
     for ch in text:
@@ -1622,11 +1755,87 @@ def normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def prepare_sarvam_tts_text(text: str, language_code: str | None) -> str:
+# Language codes that render in a native (non-Latin) script. Latin runs fed to
+# Bulbul under these codes mispronounce, so we transliterate them. en-IN is the
+# only Latin-target code. hi-IN is shared by hindi (native) and hinglish
+# (intentional code-mix); the caller disambiguates via language_id.
+_NATIVE_TTS_LANGUAGE_CODES = frozenset(
+    code for code in SARVAM_LANGUAGE_CODES.values() if code != "en-IN"
+)
+# Sarvam transliterate output script per target language code.
+_SARVAM_TRANSLITERATE_TARGETS = {
+    code: code for code in _NATIVE_TTS_LANGUAGE_CODES
+}
+# Run of Latin letters (with internal apostrophes/hyphens) — the unit we
+# transliterate. Digits, ₹, punctuation and native-script text are left alone.
+_LATIN_RUN_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+
+
+@lru_cache(maxsize=2048)
+def _sarvam_transliterate_word(word: str, target_language_code: str) -> str:
+    """Transliterate a single Latin word into target_language_code's script via
+    Sarvam. Returns the original word on any failure (never raises). Cached, so a
+    given word costs one network call for the whole process lifetime."""
+    if not SARVAM_API_KEY:
+        return word
+    try:
+        resp = requests.post(
+            f"{SARVAM_BASE_URL}/transliterate",
+            headers={
+                "api-subscription-key": SARVAM_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "input": word,
+                "source_language_code": "en-IN",
+                "target_language_code": target_language_code,
+                "spoken_form": True,
+            },
+            timeout=6,
+        )
+        if not resp.ok:
+            return word
+        out = (resp.json() or {}).get("transliterated_text")
+        return str(out).strip() or word
+    except Exception:
+        return word
+
+
+def transliterate_latin_for_tts(text: str, language_code: str | None) -> str:
+    """Replace Latin-script words with their native-script transliteration so a
+    non-English Bulbul voice pronounces them correctly. Allowlisted brand tokens
+    (DHL, MyBill, ...) and pure-digit/symbol tokens are left untouched."""
+    code = (language_code or "").strip()
+    if code not in _NATIVE_TTS_LANGUAGE_CODES:
+        return text
+    target = _SARVAM_TRANSLITERATE_TARGETS.get(code)
+    if not target:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        word = match.group(0)
+        if word.casefold() in SARVAM_TTS_LATIN_ALLOWLIST:
+            return word
+        # Single bare letters (e.g. an "a" article fragment) and all-caps
+        # acronyms are safer left as-is for Bulbul's letter reading.
+        if len(word) == 1:
+            return word
+        return _sarvam_transliterate_word(word, target)
+
+    return _LATIN_RUN_RE.sub(_replace, text)
+
+
+def prepare_sarvam_tts_text(
+    text: str,
+    language_code: str | None,
+    language_id: str | None = None,
+) -> str:
     """Normalize spoken text for Bulbul without changing the visible transcript.
 
     This keeps the policy output intact while making business strings like
-    invoice IDs and semicolon-separated lists sound less clipped.
+    invoice IDs and semicolon-separated lists sound less clipped. When the target
+    language renders in a native script, Latin-script words are transliterated so
+    the voice does not mispronounce them (controlled by SARVAM_TTS_TRANSLITERATE).
     """
     cleaned = normalize_whitespace(text)
     if not cleaned:
@@ -1638,6 +1847,16 @@ def prepare_sarvam_tts_text(text: str, language_code: str | None) -> str:
     cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
     cleaned = re.sub(r"(?<!\d),(?=\S)", ", ", cleaned)
     cleaned = re.sub(r"([.!?])(?=\S)", r"\1 ", cleaned)
+
+    # hinglish deliberately keeps English words in Latin; never transliterate it
+    # even though it shares the hi-IN code with native Hindi.
+    resolved_id = (language_id or "").strip().lower()
+    if (
+        SARVAM_TTS_TRANSLITERATE
+        and resolved_id != "hinglish"
+        and (language_code or "").strip() in _NATIVE_TTS_LANGUAGE_CODES
+    ):
+        cleaned = transliterate_latin_for_tts(cleaned, language_code)
 
     if (language_code or "").lower() in {"hi-in", "mr-in"}:
         cleaned = cleaned.replace("₹", " INR ")
@@ -5092,7 +5311,8 @@ def tts_stream(ws):
                 if not text:
                     continue
                 language_code = str(msg.get("language_code") or state["language_code"])
-                speech_text = prepare_sarvam_tts_text(text, language_code)
+                language_id = msg.get("language_id")
+                speech_text = prepare_sarvam_tts_text(text, language_code, language_id)
                 if not speech_text:
                     continue
                 utterance_id = str(msg.get("utterance_id") or uuid.uuid4().hex[:10])
@@ -5838,6 +6058,20 @@ class PhoneCallSession:
     def _start_ambience_loop(self) -> None:
         if not PHONE_AMBIENCE_ENABLED or self._ambience_thread is not None and self._ambience_thread.is_alive():
             return
+        # Surface a missing/unloadable ambience file once per call. Without this
+        # the pump runs but every segment is empty, which presents as silent
+        # dead air with no error in the log (the original phone-vs-browser bug).
+        if not self._ambience_started_logged:
+            profile_pcm, _ = load_phone_ambience_profile(EXOTEL_STREAM_SAMPLE_RATE)
+            if not profile_pcm:
+                self.log_event(
+                    "ambience_error",
+                    {
+                        "message": "ambience file missing or unloadable; phone will have dead air",
+                        "path": str(PHONE_AMBIENCE_FILE),
+                        "exists": PHONE_AMBIENCE_FILE.exists(),
+                    },
+                )
         thread = threading.Thread(target=self._ambience_pump, daemon=True)
         self._ambience_thread = thread
         thread.start()
@@ -6009,7 +6243,7 @@ class PhoneCallSession:
 
     def _render_and_send_tts(self, serial: int, response_id: str, mark_name: str, text: str) -> None:
         language_code = sarvam_language_code(self.active_language_id)
-        speech_text = prepare_sarvam_tts_text(text, language_code)
+        speech_text = prepare_sarvam_tts_text(text, language_code, self.active_language_id)
         if not speech_text:
             return
 

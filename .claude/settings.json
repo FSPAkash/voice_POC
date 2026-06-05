@@ -41,7 +41,10 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:reference-server.pipecat.ai)",
       "Bash(python -c \"import app; print\\('OK', app.CHAT_MODEL, app.SARVAM_TTS_WS_URL, app.SARVAM_STT_WS_URL\\)\")",
-      "Bash(python -c \"import app; print\\('OK', app.SARVAM_STT_WS_URL\\)\")"
+      "Bash(python -c \"import app; print\\('OK', app.SARVAM_STT_WS_URL\\)\")",
+      "Bash(python -c \"import wave; w=wave.open\\('frontend/public/sound/call_center_background.wav','rb'\\); print\\('ch',w.getnchannels\\(\\),'rate',w.getframerate\\(\\),'width',w.getsampwidth\\(\\),'frames',w.getnframes\\(\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -m pytest backend/tests/ -q)"
     ]
   }
 }
