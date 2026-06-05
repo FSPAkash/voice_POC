@@ -147,7 +147,8 @@ SARVAM_STT_SAMPLE_RATE = _env_int("SARVAM_STT_SAMPLE_RATE", 16000, minimum=8000,
 # reads less rushed/robotic, and a small temperature bump adds intonation without
 # risking instability. All overridable from env for quick A/B testing on calls.
 SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.05, minimum=0.5, maximum=2.0)
-SARVAM_TTS_PACE_ENGLISH = _env_float("SARVAM_TTS_PACE_ENGLISH", 1.10, minimum=0.5, maximum=2.0)
+# English/aditya read slow at 1.10; 1.2 keeps a natural brisk-but-clear pace.
+SARVAM_TTS_PACE_ENGLISH = _env_float("SARVAM_TTS_PACE_ENGLISH", 1.2, minimum=0.5, maximum=2.0)
 SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.72, minimum=0.01, maximum=1.0)
 # Humanize spoken text (spell dates, group long numbers, light clause pauses) so
 # Bulbul does not read IDs/dates mechanically. Off -> previous behaviour.
@@ -2004,18 +2005,30 @@ def _spoken_iso_date(match: re.Match[str]) -> str:
     return f"{day_word} {_MONTH_NAMES[month - 1]} {year}"
 
 
-def humanize_spoken_text(text: str, language_code: str | None) -> str:
-    """Make business strings sound spoken rather than printed: spell ISO dates,
-    add a light pause around long alphanumeric IDs so they aren't rushed, and
-    avoid run-on delivery. Only applied for English/Hinglish where the spelled
-    English month/ordinal words fit naturally; native scripts keep digits (Bulbul
-    reads them correctly in-language) but still get the ID pause."""
-    code = (language_code or "").strip().lower()
-    english_like = code in {"en-in", "hi-in"}
+def _spoken_iso_date_numeric(match: re.Match[str]) -> str:
+    """ISO date -> 'day month year' as plain digits, e.g. 31 1 2026. Bulbul reads
+    digits correctly in any language; this avoids the awful double-mangling that
+    happens when English month/ordinal WORDS are later transliterated to Devanagari."""
+    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return match.group(0)
+    return f"{day} {month} {year}"
 
-    # ISO dates -> spoken English (only when English words fit the delivery).
-    if english_like:
+
+def humanize_spoken_text(text: str, language_code: str | None) -> str:
+    """Make business strings sound spoken rather than printed: reformat ISO dates
+    and add a light pause around long alphanumeric IDs so they aren't rushed.
+
+    Only PURE English (en-IN) gets spelled month/ordinal words. For Hindi /
+    Hinglish / native scripts those English words would either be read as foreign
+    or (worse) transliterated phonetically into Devanagari and mispronounced, so
+    those keep digit form, which Bulbul speaks correctly in-language."""
+    code = (language_code or "").strip().lower()
+
+    if code == "en-in":
         text = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b", _spoken_iso_date, text)
+    else:
+        text = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b", _spoken_iso_date_numeric, text)
 
     # Long alphanumeric IDs (e.g. DHL123456): keep the split letters+digits but
     # add a slight comma pause so the voice doesn't machine-gun the digits.

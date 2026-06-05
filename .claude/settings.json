@@ -44,7 +44,13 @@
       "Bash(python -c \"import app; print\\('OK', app.SARVAM_STT_WS_URL\\)\")",
       "Bash(python -c \"import wave; w=wave.open\\('frontend/public/sound/call_center_background.wav','rb'\\); print\\('ch',w.getnchannels\\(\\),'rate',w.getframerate\\(\\),'width',w.getsampwidth\\(\\),'frames',w.getnframes\\(\\)\\)\")",
       "Bash(python -c ' *)",
-      "Bash(python -m pytest backend/tests/ -q)"
+      "Bash(python -m pytest backend/tests/ -q)",
+      "Bash(grep -rn \"SARVAM_TTS_PACE\" --include=\"*.env*\" --include=\".env\" .)",
+      "Bash(ls -la backend/.env*)",
+      "Bash(ls -la .env*)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\AkashPatil\\.claude\\projects\\c--Users-AkashPatil-DHL-POC\\memory"
     ]
   }
 }
