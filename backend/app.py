@@ -1453,13 +1453,18 @@ def phone_language_switch_signal(
         }
 
     if has_script:
-        if len(tokens) >= 3 and alpha_count >= 8:
+        # Token count is the reliable signal. alpha_character_count is biased
+        # against Indic scripts — Devanagari words pack into far fewer codepoints
+        # than Latin, so a clear 4-word reply like "हा जी आहे ना" has only ~5
+        # alpha chars and was wrongly dropped as a short fragment. Lean on tokens;
+        # keep a low alpha floor only to reject single stray glyphs.
+        if len(tokens) >= 3:
             return {
                 "action": "switch",
                 "candidate_language_id": normalized_candidate,
                 "reason": "strong_script_switch",
             }
-        if len(tokens) >= 2 and alpha_count >= 6:
+        if len(tokens) >= 2 or alpha_count >= 4:
             return {
                 "action": "tentative",
                 "candidate_language_id": normalized_candidate,

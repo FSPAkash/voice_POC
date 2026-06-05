@@ -218,7 +218,10 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(signal["action"], "switch")
         self.assertEqual(signal["candidate_language_id"], "tamil")
 
-    def test_phone_session_confirms_short_supported_language_switch_on_repeat(self) -> None:
+    def test_phone_session_low_confidence_switch_is_corroborated(self) -> None:
+        # The stickiness gate holds a switch when Sarvam reports LOW confidence,
+        # requiring a second consistent turn before flipping language. (Clear
+        # native script with normal/absent confidence switches immediately.)
         session = policy_app.PhoneCallSession(
             session_id="cost_session_phone_test",
             account_number="DHL001",
@@ -228,18 +231,39 @@ class PolicyEngineTests(unittest.TestCase):
             voice=policy_app.DEFAULT_REALTIME_VOICE,
         )
 
-        session._handle_final_transcript("\u0ba8\u0bbe\u0ba9\u0bcd \u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0ba4\u0bbe\u0ba9\u0bcd", "ta-IN")
+        session._handle_final_transcript("\u0ba8\u0bbe\u0ba9\u0bcd \u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0ba4\u0bbe\u0ba9\u0bcd", "ta-IN", 0.2)
 
         self.assertFalse(any(entry["role"] == "customer" for entry in session.transcript))
         self.assertEqual(session.active_language_id, "hinglish")
 
-        session._handle_final_transcript("\u0ba8\u0bbe\u0ba9\u0bcd \u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0ba4\u0bbe\u0ba9\u0bcd", "ta-IN")
+        session._handle_final_transcript("\u0ba8\u0bbe\u0ba9\u0bcd \u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0ba4\u0bbe\u0ba9\u0bcd", "ta-IN", 0.2)
         timer = session._turn_commit_timer
         if timer is not None:
             timer.cancel()
 
         self.assertTrue(any(entry["role"] == "customer" for entry in session.transcript))
         self.assertEqual(session.active_language_id, "tamil")
+
+    def test_phone_session_switches_on_clear_multiword_script(self) -> None:
+        # A clear multi-word native-script reply must switch immediately, even
+        # though Devanagari/Tamil words have a low alpha-char count. Regression
+        # for "\u0939\u093e \u091c\u0940 \u0906\u0939\u0947 \u0928\u093e" being wrongly dropped as a short fragment.
+        session = policy_app.PhoneCallSession(
+            session_id="cost_session_phone_test",
+            account_number="DHL001",
+            target_number="+919136152622",
+            caller_id="02246182014",
+            language_id="hinglish",
+            voice=policy_app.DEFAULT_REALTIME_VOICE,
+        )
+
+        session._handle_final_transcript("\u0939\u093e \u091c\u0940 \u0906\u0939\u0947 \u0928\u093e", "mr-IN")
+        timer = session._turn_commit_timer
+        if timer is not None:
+            timer.cancel()
+
+        self.assertTrue(any(entry["role"] == "customer" for entry in session.transcript))
+        self.assertEqual(session.active_language_id, "marathi")
 
     def test_phone_session_short_partial_needs_real_speech_before_barge_in(self) -> None:
         session = policy_app.PhoneCallSession(
