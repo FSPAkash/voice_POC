@@ -189,10 +189,12 @@ PHONE_STT_SILENCE_FLUSH_SECONDS = _env_float("PHONE_STT_SILENCE_FLUSH_SECONDS", 
 PHONE_TURN_COMMIT_DELAY_SECONDS = _env_float("PHONE_TURN_COMMIT_DELAY_SECONDS", 0.1, minimum=0.0, maximum=1.0)
 PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS = _env_float("PHONE_SHORT_FRAGMENT_COMMIT_DELAY_SECONDS", 0.38, minimum=0.0, maximum=1.0)
 PHONE_AMBIENCE_ENABLED = _env_flag("PHONE_AMBIENCE_ENABLED", True)
-PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 2.2, minimum=0.0, maximum=4.0)
-PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.3, minimum=0.0, maximum=4.0)
-PHONE_AMBIENCE_TARGET_RMS = _env_float("PHONE_AMBIENCE_TARGET_RMS", 2400.0, minimum=200.0, maximum=6000.0)
-PHONE_AMBIENCE_MAX_NORMALIZE_GAIN = _env_float("PHONE_AMBIENCE_MAX_NORMALIZE_GAIN", 8.0, minimum=1.0, maximum=12.0)
+PHONE_AMBIENCE_IDLE_GAIN = _env_float("PHONE_AMBIENCE_IDLE_GAIN", 0.9, minimum=0.0, maximum=4.0)
+PHONE_AMBIENCE_TTS_GAIN = _env_float("PHONE_AMBIENCE_TTS_GAIN", 0.15, minimum=0.0, maximum=4.0)
+# Subtle bed: ~900 RMS idle is faint room tone, not a busy call-center wall.
+# Measured 6836 RMS in the field was far too hot (target 2400 x idle 2.2).
+PHONE_AMBIENCE_TARGET_RMS = _env_float("PHONE_AMBIENCE_TARGET_RMS", 900.0, minimum=200.0, maximum=6000.0)
+PHONE_AMBIENCE_MAX_NORMALIZE_GAIN = _env_float("PHONE_AMBIENCE_MAX_NORMALIZE_GAIN", 4.0, minimum=1.0, maximum=12.0)
 def _resolve_phone_ambience_file() -> Path:
     """Locate the call-center ambience WAV. Prefer an explicit override, then a
     backend-local copy (ships with the backend deploy), then the frontend asset
@@ -1771,13 +1773,23 @@ _SARVAM_TRANSLITERATE_TARGETS = {
 _LATIN_RUN_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
 
 
-@lru_cache(maxsize=2048)
-def _sarvam_transliterate_word(word: str, target_language_code: str) -> str:
-    """Transliterate a single Latin word into target_language_code's script via
-    Sarvam. Returns the original word on any failure (never raises). Cached, so a
-    given word costs one network call for the whole process lifetime."""
-    if not SARVAM_API_KEY:
-        return word
+# Process-lifetime cache of word -> native script, keyed by (word_cf, target).
+# Persists across turns/calls so common words ("payment", "invoice", "theek")
+# are transliterated at most once ever.
+_TRANSLITERATE_CACHE: dict[tuple[str, str], str] = {}
+_TRANSLITERATE_CACHE_LOCK = threading.Lock()
+# Newline-safe separator we send to Sarvam to batch many words in one request.
+_TRANSLITERATE_BATCH_SEP = "\n"
+
+
+def _sarvam_transliterate_batch(words: list[str], target_language_code: str) -> dict[str, str]:
+    """Transliterate many Latin words in a SINGLE request. Returns {word: native}.
+    Never raises; missing/failed words simply absent from the result so the caller
+    falls back to the original. One network round-trip regardless of word count,
+    so it stays out of the per-turn latency budget."""
+    if not words or not SARVAM_API_KEY:
+        return {}
+    payload_text = _TRANSLITERATE_BATCH_SEP.join(words)
     try:
         resp = requests.post(
             f"{SARVAM_BASE_URL}/transliterate",
@@ -1786,7 +1798,7 @@ def _sarvam_transliterate_word(word: str, target_language_code: str) -> str:
                 "Content-Type": "application/json",
             },
             json={
-                "input": word,
+                "input": payload_text,
                 "source_language_code": "en-IN",
                 "target_language_code": target_language_code,
                 "spoken_form": True,
@@ -1794,17 +1806,38 @@ def _sarvam_transliterate_word(word: str, target_language_code: str) -> str:
             timeout=6,
         )
         if not resp.ok:
-            return word
-        out = (resp.json() or {}).get("transliterated_text")
-        return str(out).strip() or word
+            return {}
+        out = str((resp.json() or {}).get("transliterated_text") or "")
     except Exception:
-        return word
+        return {}
+    parts = out.split(_TRANSLITERATE_BATCH_SEP)
+    # Only trust a clean 1:1 line alignment; otherwise skip rather than misalign.
+    if len(parts) != len(words):
+        return {}
+    mapping: dict[str, str] = {}
+    for src, dst in zip(words, parts):
+        dst = dst.strip()
+        if dst:
+            mapping[src] = dst
+    return mapping
+
+
+def _should_transliterate_word(word: str) -> bool:
+    if word.casefold() in SARVAM_TTS_LATIN_ALLOWLIST:
+        return False
+    # Single letters and all-caps acronyms read better as letters in Bulbul.
+    if len(word) == 1:
+        return False
+    if word.isupper() and len(word) <= 4:
+        return False
+    return True
 
 
 def transliterate_latin_for_tts(text: str, language_code: str | None) -> str:
     """Replace Latin-script words with their native-script transliteration so a
     non-English Bulbul voice pronounces them correctly. Allowlisted brand tokens
-    (DHL, MyBill, ...) and pure-digit/symbol tokens are left untouched."""
+    (DHL, MyBill, ...), digits and punctuation are left untouched. Uses one
+    batched network call for all uncached words to keep TTS latency low."""
     code = (language_code or "").strip()
     if code not in _NATIVE_TTS_LANGUAGE_CODES:
         return text
@@ -1812,15 +1845,34 @@ def transliterate_latin_for_tts(text: str, language_code: str | None) -> str:
     if not target:
         return text
 
+    words = [m.group(0) for m in _LATIN_RUN_RE.finditer(text)]
+    if not words:
+        return text
+
+    # Resolve from cache first; collect the misses for one batched call.
+    resolved: dict[str, str] = {}
+    misses: list[str] = []
+    with _TRANSLITERATE_CACHE_LOCK:
+        for word in words:
+            if not _should_transliterate_word(word):
+                continue
+            cached = _TRANSLITERATE_CACHE.get((word.casefold(), target))
+            if cached is not None:
+                resolved[word] = cached
+            elif word not in resolved and word not in misses:
+                misses.append(word)
+
+    if misses:
+        fetched = _sarvam_transliterate_batch(misses, target)
+        with _TRANSLITERATE_CACHE_LOCK:
+            for word in misses:
+                native = fetched.get(word, word)  # fall back to original on miss
+                _TRANSLITERATE_CACHE[(word.casefold(), target)] = native
+                resolved[word] = native
+
     def _replace(match: re.Match[str]) -> str:
         word = match.group(0)
-        if word.casefold() in SARVAM_TTS_LATIN_ALLOWLIST:
-            return word
-        # Single bare letters (e.g. an "a" article fragment) and all-caps
-        # acronyms are safer left as-is for Bulbul's letter reading.
-        if len(word) == 1:
-            return word
-        return _sarvam_transliterate_word(word, target)
+        return resolved.get(word, word)
 
     return _LATIN_RUN_RE.sub(_replace, text)
 
@@ -5717,30 +5769,33 @@ def load_phone_ambience_profile(sample_rate: int) -> tuple[bytes, int]:
     if not pcm:
         return b"", 0
 
+    # Normalize against the OVERALL loudness of the clip (not the loudest window)
+    # so the steady bed sits at PHONE_AMBIENCE_TARGET_RMS.
+    reference_rms = pcm16_rms(pcm)
+    if reference_rms <= 0:
+        return pcm, 0
+
+    # Start from the first window that reaches a representative level (>= 60% of
+    # overall RMS), skipping any quiet intro so the call does not open on near
+    # silence — but NOT the loudest moment, so it does not open on a peak.
     window_bytes = max(int(sample_rate * 2 * 0.5), 320)
     step_bytes = max(window_bytes // 2, 2)
     scan_limit = min(len(pcm), max(window_bytes * 16, window_bytes))
-    best_offset = 0
-    best_rms = 0.0
-
+    threshold = reference_rms * 0.6
+    start_offset = 0
     upper_bound = max(scan_limit - window_bytes, 0)
     for offset in range(0, upper_bound + 1, step_bytes):
-        segment = pcm[offset : offset + window_bytes]
-        if not segment:
-            continue
-        rms = pcm16_rms(segment)
-        if rms > best_rms:
-            best_rms = rms
-            best_offset = offset
+        if pcm16_rms(pcm[offset : offset + window_bytes]) >= threshold:
+            start_offset = offset
+            break
 
-    reference_rms = best_rms or pcm16_rms(pcm)
-    if reference_rms <= 0:
-        return pcm, best_offset
-
+    # Allow BOTH attenuation and boost. Previously gain<=1.0 returned the clip
+    # un-touched, so a target below the clip's RMS could never make it quieter —
+    # that left the bed far too loud (measured 6836 RMS in the field).
     gain = min(PHONE_AMBIENCE_MAX_NORMALIZE_GAIN, PHONE_AMBIENCE_TARGET_RMS / reference_rms)
-    if gain <= 1.0:
-        return pcm, best_offset
-    return apply_pcm16_gain(pcm, gain), best_offset
+    if abs(gain - 1.0) < 1e-3:
+        return pcm, start_offset
+    return apply_pcm16_gain(pcm, gain), start_offset
 
 
 def mix_pcm16_le(foreground: bytes, background: bytes) -> bytes:
@@ -5877,6 +5932,7 @@ class PhoneCallSession:
         self._media_send_lock = threading.Lock()
         self._pending_language_candidate: str | None = None
         self._pending_language_candidate_at: float | None = None
+        self._last_unspeakable_reprompt_at: float | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -6215,6 +6271,33 @@ class PhoneCallSession:
             self._send_json({"event": "clear", "stream_sid": self.stream_sid})
         except Exception:
             pass
+
+    def _reprompt_after_unspeakable_turn(self, drop_reason: str) -> None:
+        """Speak a short nudge when we had to drop the customer's turn (e.g. they
+        spoke a language we cannot render) so the call does not stall into silence.
+        Rate-limited so repeated unspeakable turns do not loop."""
+        now = time.time()
+        with self._lock:
+            if self._stop or not self.stream_sid:
+                return
+            # Do not step on an agent reply that is already (re)starting.
+            if self._current_response_id or self._current_mark_name:
+                return
+            last = self._last_unspeakable_reprompt_at
+            if last is not None and now - last < 6.0:
+                return
+            self._last_unspeakable_reprompt_at = now
+        active = supported_render_language_id(self.active_language_id)
+        prompts = {
+            "english": "Sorry, I didn't catch that. Could you please continue in English or Hindi?",
+            "hindi": "माफ कीजिए, मैं समझ नहीं पाया। क्या आप Hindi या English में बता सकते हैं?",
+            "hinglish": "Sorry, main samajh nahi paaya. Kya aap Hindi ya English mein bata sakte hain?",
+            "marathi": "क्षमा करा, मला समजलं नाही। तुम्ही Marathi किंवा English मध्ये सांगू शकता का?",
+            "bengali": "ক্ষমা করবেন, আমি বুঝতে পারিনি। আপনি কি Bengali বা English-এ বলতে পারবেন?",
+            "tamil": "மன்னிக்கவும், புரியவில்லை. Tamil அல்லது English-ல் சால்ல முடியுமா?",
+        }
+        message = prompts.get(active, prompts["english"])
+        self._speak_reply(message)
 
     def _speak_reply(self, text: str) -> None:
         normalized = normalize_whitespace(text).strip()
@@ -6656,13 +6739,19 @@ class PhoneCallSession:
             language_signal.get("candidate_language_id") or self.active_language_id
         )
         if signal_action == "drop":
+            drop_reason = str(language_signal.get("reason") or "unexpected_language_fragment")
             self.log_event(
                 "stt_dropped",
                 {
-                    "reason": str(language_signal.get("reason") or "unexpected_language_fragment"),
+                    "reason": drop_reason,
                     "text": trimmed[:120],
                 },
             )
+            # We dropped the customer turn AND (above) may have cancelled the
+            # agent's in-flight reply on barge-in. Without a re-prompt the call
+            # falls to permanent silence (ambience only). Nudge the customer to
+            # continue in a language we can actually speak back.
+            self._reprompt_after_unspeakable_turn(drop_reason)
             return
         if signal_action == "tentative" and signal_candidate != supported_render_language_id(self.active_language_id):
             if not self._confirm_tentative_language_candidate(signal_candidate):

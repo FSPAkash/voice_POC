@@ -342,16 +342,21 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertTrue(policy_app.should_use_fast_deterministic_turn(affirmative))
         self.assertFalse(policy_app.should_use_fast_deterministic_turn(generic))
 
-    def test_phone_ambience_profile_starts_from_stronger_section(self) -> None:
+    def test_phone_ambience_profile_is_subtle_and_starts_at_beginning(self) -> None:
         raw = policy_app.load_phone_ambience_pcm(policy_app.EXOTEL_STREAM_SAMPLE_RATE)
         processed, start_offset = policy_app.load_phone_ambience_profile(policy_app.EXOTEL_STREAM_SAMPLE_RATE)
 
         self.assertTrue(raw)
         self.assertTrue(processed)
-        self.assertGreater(start_offset, 0)
-        raw_head_rms = policy_app.pcm16_rms(raw[:1600])
-        processed_start_rms = policy_app.pcm16_rms(processed[start_offset : start_offset + 1600])
-        self.assertGreater(processed_start_rms, raw_head_rms)
+        # Overall bed is normalized to the subtle target RMS (within tolerance),
+        # never the loud field value (~6800) seen before.
+        processed_rms = policy_app.pcm16_rms(processed)
+        self.assertLessEqual(processed_rms, policy_app.PHONE_AMBIENCE_TARGET_RMS * 1.25)
+        self.assertGreater(processed_rms, 0)
+        # Start window is representative (not a near-silent intro), so playback
+        # opens on audible room tone rather than dead air.
+        window = processed[start_offset : start_offset + 1600]
+        self.assertGreater(policy_app.pcm16_rms(window), processed_rms * 0.4)
 
     def test_phone_session_emits_idle_ambience_after_playback_completion(self) -> None:
         session = policy_app.PhoneCallSession(
@@ -378,7 +383,11 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertTrue(any(payload.get("event") == "media" for payload in sent_payloads))
         media_payload = next(payload for payload in sent_payloads if payload.get("event") == "media")
         raw = base64.b64decode(str(media_payload["media"]["payload"]))
-        self.assertGreater(policy_app.pcm16_rms(raw), 2500)
+        # Idle ambience must be audible (non-silent) but kept subtle — well below
+        # the old field level (~6800 RMS) that callers found too loud.
+        idle_rms = policy_app.pcm16_rms(raw)
+        self.assertGreater(idle_rms, 0)
+        self.assertLessEqual(idle_rms, policy_app.PHONE_AMBIENCE_TARGET_RMS * 1.5)
 
     def test_llm_mode_uses_fast_deterministic_path_for_line_by_line_request(self) -> None:
         messages = [
