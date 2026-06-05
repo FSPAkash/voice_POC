@@ -511,6 +511,25 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertIsNone(session._current_response_id)
         self.assertEqual(session.turn_number, 1)
 
+    def test_busy_customer_gets_callback_offer_not_collections_push(self) -> None:
+        # "I'm in a meeting, call me later" must be handled as a callback request,
+        # not misread as affirmative-to-proceed (the weird-call regression).
+        messages = [
+            {"role": "assistant", "text": "Good day, am I speaking with Anthony?"},
+            {"role": "customer", "text": "I am in a meeting, can you call me after five minutes?"},
+        ]
+        text, tool_calls, _ = policy_app.generate_collections_reply(
+            messages,
+            "DHL001",
+            "aditya",
+            {"suggested_language_id": "english"},
+            [],
+        )
+        lowered = text.lower()
+        self.assertIn("call you back", lowered)
+        self.assertNotIn("57,920", text)  # must not push the outstanding total
+        self.assertEqual(tool_calls, [])
+
     def test_create_session_reuses_requested_cost_session_id(self) -> None:
         client = policy_app.app.test_client()
 

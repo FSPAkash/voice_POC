@@ -54,7 +54,9 @@
       "Bash(python -c \"import app; print\\('module SARVAM_TTS_TEMPERATURE =', app.SARVAM_TTS_TEMPERATURE\\)\")",
       "Bash(python -c \"import app; print\\('TEMP default in module:', app.SARVAM_TTS_TEMPERATURE\\)\")",
       "Bash(find . -name \".env*\" -not -path \"*/node_modules/*\")",
-      "Bash(grep -rin \"temperature\" --include=\".env*\" .)"
+      "Bash(grep -rin \"temperature\" --include=\".env*\" .)",
+      "Bash(cd /c/Users/AkashPatil/DHL_POC/backend && grep -rn \"thinking_filler\\\\|_schedule_thinking\\\\|_cancel_thinking\\\\|_emit_thinking\\\\|PHONE_THINKING_FILLER\\\\|is_filler\\\\|assistant_filler\\\\|_thinking_filler_timer\" app.py | head -50)",
+      "Read(//c/c/Users/AkashPatil/DHL_POC/backend/**)"
     ],
     "additionalDirectories": [
       "c:\\Users\\AkashPatil\\.claude\\projects\\c--Users-AkashPatil-DHL-POC\\memory"

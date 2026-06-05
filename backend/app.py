@@ -255,27 +255,6 @@ PHONE_TRUSTED_SWITCH_REASONS = frozenset(
     {"strong_script_switch", "explicit_request", "plain_english"}
 )
 
-# Thinking filler: when a turn takes longer than this to produce a reply (the slow
-# LLM path), speak a short "let me check" phrase so the customer hears the agent
-# is working rather than dead air / only ambience. Cancelled the moment the real
-# reply starts. Set delay to 0 to disable.
-PHONE_THINKING_FILLER_DELAY_SECONDS = _env_float(
-    "PHONE_THINKING_FILLER_DELAY_SECONDS",
-    0.9,
-    minimum=0.0,
-    maximum=5.0,
-)
-# Per-language short filler phrases. Kept very short so they never collide with
-# the real reply for long. English avoids over-formality.
-PHONE_THINKING_FILLER_PHRASES: dict[str, str] = {
-    "english": "Let me just check that for you.",
-    "hinglish": "Ek second, main check karta hoon.",
-    "hindi": "एक सेकंड, मैं देख लेता हूँ।",
-    "marathi": "एक मिनिट, मी बघतो.",
-    "bengali": "এক সেকেন্ড, আমি দেখে নিচ্ছি।",
-    "tamil": "ஒரு நிமிடம், நான் பார்க்கிறேன்.",
-}
-
 # Voice -> agent persona. Sarvam picks the voice; the agent prompt must use a
 # matching name and pronouns so the customer never hears a male name on a female voice.
 VOICE_PERSONAS: dict[str, dict[str, str]] = {
@@ -2520,6 +2499,14 @@ def invoice_mentioned_in_text(text: str, invoices: list[dict[str, Any]]) -> dict
 def analyze_customer_turn(text: str) -> dict[str, Any]:
     lowered = normalize_whitespace(text).lower()
     return {
+        # Customer is busy / wants to be called back. Detected BEFORE acting on
+        # is_affirmative so "Auntie is speaking but I'm in a meeting, call me in
+        # 5 minutes" is handled as a callback request, not a yes to proceed.
+        "call_back_later": bool(re.search(
+            r"(?:\b(?:call (?:me )?(?:back|later|after)|call me in|in a meeting|i.?m busy|i am busy|busy right now|not a good time|can you call|reschedule|ring me later|later please)\b"
+            r"|बाद में (?:कॉल|फोन|बात)|मीटिंग में|अभी busy|व्यस्त|बाद में call|थोड़ी देर बाद|मीटिंग चल रही|नंतर (?:कॉल|फोन)|मी busy|मीटिंग मध्ये|পরে (?:কল|ফোন)|মিটিং)",
+            lowered,
+        )),
         "is_affirmative": bool(re.search(
             r"(?:\b(?:yes|yeah|yep|yup|haan|ha|ji|speaking|that.s me|this is he|this is she|correct)\b|हाँ|हां|जी|मैं ही|मै ही|यही|बोल रहा हूँ|बोल रही हूँ|बात कर रहा हूँ|बात कर रही हूँ|तुम .*से बात कर रहे हो)",
             lowered,
@@ -2653,6 +2640,7 @@ FAST_DETERMINISTIC_SIGNAL_NAMES = {
     "discount",
     "human_request",
     "refusal",
+    "call_back_later",
 }
 
 
@@ -2753,6 +2741,20 @@ def generate_collections_reply(
             tool_calls,
             DETERMINISTIC_CHAT_MODEL,
         )
+
+    # Customer is busy / asked to be called back. Acknowledge and offer to
+    # reschedule rather than pushing collections. Do NOT treat as affirmative.
+    if signals["call_back_later"]:
+        callback = {
+            "english": "No problem, I won't take much of your time. When would be a good time to call you back about the pending DHL invoices?",
+            "hinglish": "Koi baat nahi, main aapka zyada time nahi loonga. Pending DHL invoices ke liye main aapko dobara kab call karoon, jo aapke liye theek ho?",
+            "hindi": "कोई बात नहीं, मैं आपका ज़्यादा समय नहीं लूँगा। Pending DHL invoices के लिए मैं आपको दोबारा कब call करूँ, जो आपके लिए ठीक हो?",
+            "marathi": "काही हरकत नाही, मी जास्त वेळ घेणार नाही. Pending DHL invoices साठी मी तुम्हाला परत कधी call करू, जे तुम्हाला सोयीचं असेल?",
+            "bengali": "কোনো সমস্যা নেই, আমি বেশি সময় নেব না। Pending DHL invoices-এর জন্য আপনাকে কখন আবার call করব, যেটা আপনার জন্য সুবিধাজনক?",
+            "tamil": "பரவாயில்லை, நான் அதிக நேரம் எடுக்க மாட்டேன். Pending DHL invoices பற்றி உங்களை எப்போது மீண்டும் call செய்யலாம், உங்களுக்கு வசதியான நேரம் எது?",
+        }
+        message = callback.get(language_id, callback["english"])
+        return (message, tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if count_entries(entries, "assistant") <= 1 and signals["is_affirmative"]:
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
@@ -6171,7 +6173,6 @@ class PhoneCallSession:
         self._pending_language_candidate: str | None = None
         self._pending_language_candidate_at: float | None = None
         self._last_unspeakable_reprompt_at: float | None = None
-        self._thinking_filler_timer: threading.Timer | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -6511,50 +6512,6 @@ class PhoneCallSession:
         except Exception:
             pass
 
-    def _schedule_thinking_filler(self, revision: int) -> None:
-        """Arm a short 'let me check' phrase to play if this turn is still
-        thinking after the delay. Keeps the line alive on slow LLM turns."""
-        if PHONE_THINKING_FILLER_DELAY_SECONDS <= 0:
-            return
-        with self._lock:
-            existing = self._thinking_filler_timer
-            if existing is not None:
-                existing.cancel()
-            timer = threading.Timer(
-                PHONE_THINKING_FILLER_DELAY_SECONDS,
-                self._emit_thinking_filler,
-                args=(revision,),
-            )
-            timer.daemon = True
-            self._thinking_filler_timer = timer
-        timer.start()
-
-    def _cancel_thinking_filler(self) -> None:
-        with self._lock:
-            timer = self._thinking_filler_timer
-            self._thinking_filler_timer = None
-        if timer is not None:
-            timer.cancel()
-
-    def _emit_thinking_filler(self, revision: int) -> None:
-        with self._lock:
-            self._thinking_filler_timer = None
-            if self._stop or not self.stream_sid:
-                return
-            # Only fill if the turn is still the current one and nothing is
-            # already speaking (real reply not started, no barge-in pending).
-            if revision != self._customer_revision:
-                return
-            if self._current_response_id or self._current_mark_name:
-                return
-        active = supported_render_language_id(self.active_language_id)
-        phrase = PHONE_THINKING_FILLER_PHRASES.get(
-            self.active_language_id,
-            PHONE_THINKING_FILLER_PHRASES.get(active, PHONE_THINKING_FILLER_PHRASES["english"]),
-        )
-        self.log_event("thinking_filler", {"language": active, "revision": revision})
-        self._speak_reply(phrase, is_filler=True)
-
     def _reprompt_after_unspeakable_turn(self, drop_reason: str) -> None:
         """Speak a short nudge when we had to drop the customer's turn (e.g. they
         spoke a language we cannot render) so the call does not stall into silence.
@@ -6582,7 +6539,7 @@ class PhoneCallSession:
         message = prompts.get(active, prompts["english"])
         self._speak_reply(message)
 
-    def _speak_reply(self, text: str, *, is_filler: bool = False) -> None:
+    def _speak_reply(self, text: str) -> None:
         normalized = normalize_whitespace(text).strip()
         if not normalized:
             return
@@ -6599,14 +6556,8 @@ class PhoneCallSession:
             self._current_mark_name = mark_name
             self._current_response_text = normalized
             self._last_agent_speak_start_at = time.time()
-        # Filler phrases are spoken but NOT added to the transcript/history, so
-        # they never pollute the summary or the LLM's view of the conversation.
-        if not is_filler:
-            self._append_transcript("assistant", normalized, entry_id=f"assistant_{response_id}")
-        self.log_event(
-            "assistant_reply" if not is_filler else "assistant_filler",
-            {"utterance_id": response_id, "text": normalized},
-        )
+        self._append_transcript("assistant", normalized, entry_id=f"assistant_{response_id}")
+        self.log_event("assistant_reply", {"utterance_id": response_id, "text": normalized})
         threading.Thread(
             target=self._render_and_send_tts,
             args=(serial, response_id, mark_name, normalized),
@@ -7144,10 +7095,6 @@ class PhoneCallSession:
         if not self._is_customer_revision_current(revision):
             self.log_event("turn_processing_dropped", {"reason": "stale_before_start", "revision": revision})
             return
-        # Arm the thinking filler. It only actually speaks if this turn is still
-        # in flight after the delay (the slow LLM path); the fast deterministic
-        # path finishes in ~2ms and cancels it well before it fires.
-        self._schedule_thinking_filler(revision)
         advice, _, lc_error = create_language_coach_review(
             {
                 "transcript": transcript_text,
@@ -7157,12 +7104,10 @@ class PhoneCallSession:
             }
         )
         if lc_error:
-            self._cancel_thinking_filler()
             self._append_transcript("system", f"Language coach error: {lc_error}")
             return
         next_language_id = supported_render_language_id(advice.get("suggested_language_id") or self.active_language_id)
         if not self._is_customer_revision_current(revision):
-            self._cancel_thinking_filler()
             self.log_event("turn_processing_dropped", {"reason": "stale_after_language_coach", "revision": revision})
             return
         with self._lock:
@@ -7183,7 +7128,6 @@ class PhoneCallSession:
                 record_chat_agent_usage(CHAT_MODEL, usage)
             except Exception:
                 pass
-        self._cancel_thinking_filler()
         if not self._is_customer_revision_current(revision):
             self.log_event("turn_processing_dropped", {"reason": "stale_after_chat", "revision": revision})
             return
@@ -7286,7 +7230,6 @@ class PhoneCallSession:
             self._cancel_playback_finish_timer_locked()
         if timer is not None:
             timer.cancel()
-        self._cancel_thinking_filler()
         self._close_stt_upstream(reset_billing=True)
         self._cancel_active_playback("call_finished")
         self.log_event("call_finished", {"reason": reason})
