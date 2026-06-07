@@ -1,0 +1,57 @@
+{
+  "default_account_id": "DHL001",
+  "payment_methods": [
+    {
+      "id": "mybill",
+      "label": "DHL MyBill self-serve portal",
+      "details": "Customer logs in at mybill.dhl.com, downloads invoice copies, and pays online."
+    },
+    {
+      "id": "virtual_account",
+      "label": "Virtual Account Number bank transfer",
+      "details": "Customer transfers the exact invoice amount through NEFT or RTGS to the DHL virtual account number."
+    }
+  ],
+  "customers": {
+    "DHL001": {
+      "account_number": "DHL001",
+      "company_name": "Mind Your Business Inc.",
+      "contact_name": "Mr Anthony Gressive",
+      "registered_email": "anthony@mybiz.com",
+      "billing_city": "Mumbai",
+      "human_transfer": {
+        "name": "Ms Sanorita",
+        "designation": "Collections Executive",
+        "phone": "+919416340644"
+      }
+    }
+  },
+  "invoices": {
+    "DHL001": [
+      {
+        "invoice_no": "DHL123456",
+        "invoice_type": "Duty Import",
+        "amount": 13600,
+        "currency": "INR",
+        "due_date": "2026-01-31",
+        "overdue_days": 60
+      },
+      {
+        "invoice_no": "DHL654321",
+        "invoice_type": "Freight Export",
+        "amount": 34650,
+        "currency": "INR",
+        "due_date": "2026-02-22",
+        "overdue_days": 45
+      },
+      {
+        "invoice_no": "DHL332241",
+        "invoice_type": "Freight Import",
+        "amount": 9670,
+        "currency": "INR",
+        "due_date": "2026-04-07",
+        "overdue_days": 30
+      }
+    ]
+  }
+}

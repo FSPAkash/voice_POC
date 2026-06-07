@@ -11,6 +11,8 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
       - key: SARVAM_API_KEY
         sync: false
       - key: OPENAI_BASE_URL
@@ -23,38 +25,65 @@ services:
         value: gpt-4.1
       - key: POLICY_ENGINE_MODE
         value: llm
+      - key: ELEVENLABS_BASE_URL
+        value: https://api.elevenlabs.io
+      - key: ELEVENLABS_TTS_MODEL
+        value: eleven_v3
+      - key: ELEVENLABS_SUPPORTED_LANGUAGE_CODES
+        value: en,hi,ta,mr,bn,te,gu,kn,ml,pa,or
+      # Male-only POC. Krishna - Human-Like Sales Agent (standard Hindi accent),
+      # added to the ElevenLabs account from the shared voice library. Baked in so
+      # deploys work out of the box; override in the dashboard to change voice.
+      - key: ELEVENLABS_DEFAULT_MALE
+        value: iB2rIwm9cQCRGWoKDRtX
+      - key: ELEVENLABS_DEFAULT_FEMALE
+        value: iB2rIwm9cQCRGWoKDRtX
+      - key: ELEVENLABS_TTS_SAMPLE_RATE_BROWSER
+        value: "24000"
+      - key: ELEVENLABS_TTS_SAMPLE_RATE_PHONE
+        value: "8000"
+      - key: ELEVENLABS_VOICE_STABILITY
+        value: "0.5"
+      - key: ELEVENLABS_VOICE_SIMILARITY
+        value: "0.75"
+      - key: ELEVENLABS_VOICE_STYLE
+        value: "0.0"
+      - key: ELEVENLABS_VOICE_SPEED
+        value: "1.15"
+      - key: ELEVENLABS_VOICE_SPEAKER_BOOST
+        value: "1"
+      - key: ELEVENLABS_TEXT_NORMALIZATION
+        value: on
+      - key: ELEVENLABS_PRON_DICT_ID
+        value: F6QAB5Afyd7NaPO4vXlb
+      - key: ELEVENLABS_PRON_DICT_VERSION_ID
+        value: sfnJqQWMZwZGEWGBbGBd
+      - key: ELEVENLABS_AUDIO_TAGS
+        value: "1"
+      - key: ELEVENLABS_TONE_DEFAULT
+        value: professional
+      - key: ELEVENLABS_TONE_EMPATHETIC
+        value: empathetic
+      - key: ELEVENLABS_TONE_FIRM
+        value: firm
+      - key: ELEVENLABS_USD_PER_MILLION_CHARS
+        value: "50"
+      - key: TTS_HUMANIZE
+        value: "1"
       - key: SARVAM_BASE_URL
         value: https://api.sarvam.ai
-      - key: SARVAM_TTS_MODEL
-        value: bulbul:v3
       - key: SARVAM_STT_MODEL
         value: saaras:v3
-      - key: SARVAM_DEFAULT_FEMALE
-        value: priya
-      - key: SARVAM_DEFAULT_MALE
-        value: ratan
-      - key: SARVAM_TTS_SAMPLE_RATE
-        value: "24000"
+      - key: SARVAM_STT_WS_URL
+        value: wss://api.sarvam.ai/speech-to-text/ws
       - key: SARVAM_STT_SAMPLE_RATE
         value: "16000"
-      - key: SARVAM_TTS_PACE
-        value: "1.1"
-      - key: SARVAM_TTS_TEMPERATURE
-        value: "0.45"
-      - key: SARVAM_TTS_MIN_BUFFER_SIZE
-        value: "30"
-      - key: SARVAM_TTS_MAX_CHUNK_LENGTH
-        value: "200"
-      - key: SARVAM_TTS_OUTPUT_CODEC
-        value: linear16
-      - key: SARVAM_TTS_OUTPUT_BITRATE
-        value: 128k
-      - key: SARVAM_TTS_SEND_COMPLETION_EVENT
-        value: "true"
-      - key: SARVAM_TTS_DICT_ID
-        sync: false
       - key: SARVAM_STT_MODE
         value: codemix
+      - key: SARVAM_INR_PER_USD
+        value: "96.13"
+      - key: SARVAM_STT_INR_PER_HOUR
+        value: "30"
       - key: EXOTEL_ACCOUNT_SID
         sync: false
       - key: EXOTEL_API_KEY
@@ -67,16 +96,10 @@ services:
         sync: false
       - key: EXOTEL_STREAM_SAMPLE_RATE
         value: "8000"
-      - key: SARVAM_INR_PER_USD
-        value: "96.13"
-      - key: SARVAM_BULBUL_V3_INR_PER_10K_CHARS
-        value: "30"
-      - key: SARVAM_BULBUL_V2_INR_PER_10K_CHARS
-        value: "15"
-      - key: SARVAM_STT_INR_PER_HOUR
-        value: "30"
       - key: DEMO_ACCOUNT_ID
         value: DHL001
+      - key: DEFAULT_LANGUAGE_ID
+        value: hinglish
       - key: FLASK_DEBUG
         value: "0"
       - key: RENDER_EXTERNAL_URL

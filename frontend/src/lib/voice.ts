@@ -1,9 +1,9 @@
-// SarvamVoiceClient — replaces the OpenAI realtime WebRTC plumbing.
-// Owns two WebSockets to the backend (TTS + STT proxies) and the WebAudio
-// graph: mic capture worklet -> upstream WS, downstream WAV chunks -> playback
-// worklet -> speakers.
+// VoiceClient — owns the browser voice plumbing. Two WebSockets to the backend
+// (TTS proxy -> ElevenLabs, STT proxy -> OpenAI realtime) plus the WebAudio
+// graph: mic capture worklet -> STT WS, downstream PCM chunks -> playback
+// worklet -> speakers. The backend WS contract is provider-neutral.
 
-export type SarvamSessionConfig = {
+export type VoiceSessionConfig = {
   session_id: string
   voice: string
   language_id: string
@@ -43,8 +43,8 @@ function wsUrlFor(path: string): string {
   return `${proto}//${window.location.host}${path}`
 }
 
-export class SarvamVoiceClient {
-  private config: SarvamSessionConfig | null = null
+export class VoiceClient {
+  private config: VoiceSessionConfig | null = null
   private ttsWs: WebSocket | null = null
   private sttWs: WebSocket | null = null
   private audioCtx: AudioContext | null = null
@@ -53,6 +53,10 @@ export class SarvamVoiceClient {
   private micSource: MediaStreamAudioSourceNode | null = null
   private mediaStream: MediaStream | null = null
   private pendingAudioMeta: { utteranceId: string; sampleRate: number; format: string } | null = null
+  // Trailing odd byte carried between PCM chunks that split mid-sample.
+  private _pcmCarry: Uint8Array | null = null
+  // Delivery tone applied to the next speak() (eleven_v3 audio tag).
+  private nextTone = ''
   private playbackState: { utteranceId: string; chars: number; serverEnded: boolean; receivedAudio: boolean } | null =
     null
   private currentUtteranceId: string | null = null
@@ -67,14 +71,14 @@ export class SarvamVoiceClient {
     this.listeners = { ...this.listeners, ...listeners }
   }
 
-  async connect(config: SarvamSessionConfig): Promise<void> {
+  async connect(config: VoiceSessionConfig): Promise<void> {
     this.config = config
     await this._openTts()
     await this._openStt()
   }
 
   async startMic(stream: MediaStream): Promise<void> {
-    if (!this.config) throw new Error('SarvamVoiceClient not connected')
+    if (!this.config) throw new Error('VoiceClient not connected')
     this.mediaStream = stream
 
     if (!this.audioCtx) {
@@ -147,6 +151,12 @@ export class SarvamVoiceClient {
     // Don't connect mic to destination — we don't want self-echo.
   }
 
+  // Delivery tone for the NEXT speak() call (eleven_v3 audio tag on the backend):
+  // 'professional' | 'empathetic' | 'firm'. Set per turn from /api/chat/turn.
+  setTone(tone: string): void {
+    this.nextTone = tone || ''
+  }
+
   speak(text: string, languageCode?: string, utteranceId?: string): string {
     if (!this.ttsWs || this.ttsWs.readyState !== WebSocket.OPEN) {
       this.listeners.onError?.('TTS socket not open')
@@ -159,6 +169,7 @@ export class SarvamVoiceClient {
         utterance_id: id,
         text,
         language_code: languageCode || this.config?.tts_language_code || this.config?.language_code || 'hi-IN',
+        tone: this.nextTone || undefined,
       }),
     )
     return id
@@ -176,7 +187,7 @@ export class SarvamVoiceClient {
       window.clearTimeout(this.armMicTimer)
       this.armMicTimer = null
     }
-    // 2. Tell backend to close upstream Sarvam TTS WS so no more chunks arrive.
+    // 2. Tell backend to close the upstream TTS stream so no more chunks arrive.
     if (this.ttsWs && this.ttsWs.readyState === WebSocket.OPEN) {
       try {
         this.ttsWs.send(JSON.stringify({ type: 'cancel' }))
@@ -332,6 +343,7 @@ export class SarvamVoiceClient {
     if (type === 'audio_start') {
       const utteranceId = String(msg.utterance_id || '')
       this.currentUtteranceId = utteranceId
+      this._pcmCarry = null
       const sampleRate = Number(msg.sample_rate || 22050)
       this.pendingAudioMeta = {
         utteranceId,
@@ -376,6 +388,7 @@ export class SarvamVoiceClient {
     if (type === 'cancelled') {
       const utteranceId = this.currentUtteranceId
       this.playbackState = null
+      this._pcmCarry = null
       this.agentSpeaking = false
       if (this.armMicTimer !== null) {
         window.clearTimeout(this.armMicTimer)
@@ -401,9 +414,24 @@ export class SarvamVoiceClient {
     try {
       let float: Float32Array
       if (format === 'pcm_s16le') {
-        // Raw int16 little-endian PCM chunk.
-        const view = new DataView(buf)
-        const samples = view.byteLength / 2
+        // Raw int16 little-endian PCM chunk. HTTP chunked streaming (ElevenLabs)
+        // can split on an ODD byte boundary, so carry the trailing byte over to
+        // the next chunk instead of reading past the DataView (which throws
+        // "Offset is outside the bounds of the DataView" and drops audio).
+        let bytes = new Uint8Array(buf)
+        if (this._pcmCarry) {
+          const merged = new Uint8Array(this._pcmCarry.length + bytes.length)
+          merged.set(this._pcmCarry, 0)
+          merged.set(bytes, this._pcmCarry.length)
+          bytes = merged
+          this._pcmCarry = null
+        }
+        if (bytes.length % 2 === 1) {
+          this._pcmCarry = bytes.slice(bytes.length - 1)
+          bytes = bytes.slice(0, bytes.length - 1)
+        }
+        const samples = bytes.length >> 1
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
         float = new Float32Array(samples)
         for (let i = 0; i < samples; i++) {
           const s = view.getInt16(i * 2, true)

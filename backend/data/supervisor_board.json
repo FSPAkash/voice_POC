@@ -3,7 +3,19 @@
     {
       "id": "new",
       "title": "New",
-      "issues": []
+      "issues": [
+        {
+          "id": "issue_a630a1769b",
+          "title": "Asked for account number",
+          "category": "policy",
+          "severity": "high",
+          "evidence": "The agent asked the customer to confirm the account number even though the account is already preloaded.",
+          "suggested_fix": "Do not ask for the account number. Use the preloaded account context directly.",
+          "turn_number": 6,
+          "status": "new",
+          "created_at": "2026-06-07T12:37:10.452206+00:00"
+        }
+      ]
     },
     {
       "id": "reviewing",
@@ -21,5 +33,5 @@
       "issues": []
     }
   ],
-  "updated_at": "2026-06-02T04:30:01.318176+00:00"
+  "updated_at": "2026-06-07T12:37:59.135374+00:00"
 }

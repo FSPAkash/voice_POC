@@ -11,7 +11,7 @@ This repo is ready to deploy to Render as a single web service:
 1. Push this repo to GitHub.
 2. In Render, choose `New +` -> `Blueprint`.
 3. Select the repository and let Render pick up [render.yaml](./render.yaml).
-4. When prompted, set `OPENAI_API_KEY` and `SARVAM_API_KEY`.
+4. When prompted, set `OPENAI_API_KEY` and `ELEVENLABS_API_KEY`.
 5. Deploy.
 
 After deploy, the app will be available on the Render web service URL and the frontend will call the backend on the same origin, so no extra frontend API URL setup is required.
@@ -20,13 +20,15 @@ After deploy, the app will be available on the Render web service URL and the fr
 
 The blueprint now matches the live stack:
 
-- OpenAI handles policy, supervisor, and language-coach turns.
-- Sarvam handles TTS and STT for the live voice loop.
+- OpenAI handles policy, supervisor, language-coach turns, **and STT** (realtime `gpt-4o-mini-transcribe`).
+- ElevenLabs handles **TTS** (Flash v2.5) for the live voice loop.
 
 You must provide these secrets in Render:
 
 - `OPENAI_API_KEY`
-- `SARVAM_API_KEY`
+- `ELEVENLABS_API_KEY`
+- `ELEVENLABS_DEFAULT_FEMALE` (an ElevenLabs voice id)
+- `ELEVENLABS_DEFAULT_MALE` (an ElevenLabs voice id)
 - `EXOTEL_ACCOUNT_SID`
 - `EXOTEL_API_KEY`
 - `EXOTEL_API_TOKEN`
@@ -38,54 +40,35 @@ The blueprint already provides sane defaults for the rest. The most important on
 - `OPENAI_LANGUAGE_COACH_MODEL`
 - `OPENAI_CHAT_MODEL`
 - `POLICY_ENGINE_MODE`
-- `SARVAM_BASE_URL`
-- `SARVAM_TTS_MODEL`
-- `SARVAM_STT_MODEL`
-- `SARVAM_DEFAULT_MALE`
-- `SARVAM_DEFAULT_FEMALE`
-- `SARVAM_TTS_SAMPLE_RATE`
-- `SARVAM_STT_SAMPLE_RATE`
-- `SARVAM_TTS_PACE`
-- `SARVAM_TTS_TEMPERATURE`
-- `SARVAM_TTS_MIN_BUFFER_SIZE`
-- `SARVAM_TTS_MAX_CHUNK_LENGTH`
-- `SARVAM_TTS_OUTPUT_CODEC`
-- `SARVAM_TTS_OUTPUT_BITRATE`
-- `SARVAM_TTS_SEND_COMPLETION_EVENT`
-- `SARVAM_STT_MODE`
-- `SARVAM_TTS_DICT_ID`
+- `ELEVENLABS_BASE_URL`
+- `ELEVENLABS_TTS_MODEL`
+- `ELEVENLABS_TTS_SAMPLE_RATE_BROWSER`
+- `ELEVENLABS_TTS_SAMPLE_RATE_PHONE`
+- `ELEVENLABS_VOICE_STABILITY` / `_SIMILARITY` / `_STYLE` / `_SPEED` / `_SPEAKER_BOOST`
+- `ELEVENLABS_USD_PER_MILLION_CHARS`
+- `TTS_HUMANIZE`
+- `OPENAI_STT_MODEL`
+- `OPENAI_STT_SAMPLE_RATE`
+- `OPENAI_REALTIME_STT_URL`
+- `OPENAI_STT_USD_PER_MINUTE`
 - `EXOTEL_API_BASE_URL`
 - `EXOTEL_STREAM_SAMPLE_RATE`
-- `SARVAM_INR_PER_USD`
-- `SARVAM_BULBUL_V3_INR_PER_10K_CHARS`
-- `SARVAM_BULBUL_V2_INR_PER_10K_CHARS`
-- `SARVAM_STT_INR_PER_HOUR`
 - `DEMO_ACCOUNT_ID`
 
-### Important Sarvam migration note
+### Voice ids
 
-If your old Render service was deployed before the Sarvam migration, it may still have stale env vars from the OpenAI realtime path such as:
-
-- `OPENAI_REALTIME_MODEL`
-- `OPENAI_REALTIME_TRANSCRIPTION_MODEL`
-- `OPENAI_REALTIME_VOICE`
-
-Those are no longer used by the backend. You can leave them in Render without breaking anything, but the clean setup is to remove them from the dashboard so the service config reflects the current speech stack.
-
-### Pronunciation dictionary
-
-If you created a Sarvam pronunciation dictionary for `DHL`, invoice numbers, `INR`, `NEFT`, or `MyBill`, set that ID in:
-
-- `SARVAM_TTS_DICT_ID`
-
-If you do not set it, deploy still works; you just lose the dictionary-based pronunciation boost.
+ElevenLabs needs a concrete `voice_id` per persona. Set `ELEVENLABS_DEFAULT_FEMALE`
+and `ELEVENLABS_DEFAULT_MALE` to voice ids from your ElevenLabs voice library. You
+can override any single persona with `ELEVENLABS_VOICE_<KEY>` (e.g.
+`ELEVENLABS_VOICE_PRIYA`). Until real ids are set the app boots but TTS will fail
+on a live call.
 
 ### Before you push
 
 1. Make sure `backend/.env` is not committed. Secrets should live only in Render env vars.
-2. Commit [render.yaml](./render.yaml), [DEPLOY_RENDER.md](./DEPLOY_RENDER.md), and your Sarvam code changes.
-3. Confirm the service in Render has both `OPENAI_API_KEY` and `SARVAM_API_KEY`.
-4. If you are using a Sarvam dictionary locally, copy that dictionary ID into Render as `SARVAM_TTS_DICT_ID`.
+2. Commit [render.yaml](./render.yaml), [DEPLOY_RENDER.md](./DEPLOY_RENDER.md), and your code changes.
+3. Confirm the service in Render has `OPENAI_API_KEY` and `ELEVENLABS_API_KEY`.
+4. Set `ELEVENLABS_DEFAULT_FEMALE` and `ELEVENLABS_DEFAULT_MALE` to real ElevenLabs voice ids.
 5. Set `EXOTEL_ACCOUNT_SID`, `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, and `EXOTEL_CALLER_ID` in Render.
 6. Make sure `RENDER_EXTERNAL_URL` exactly matches the public service URL, because Exotel uses it for the outbound status callback and live `wss://` media bridge.
 
@@ -94,10 +77,10 @@ If you do not set it, deploy still works; you just lose the dictionary-based pro
 Smoke-test these before you call it done:
 
 1. Open `/health` and make sure the service is healthy.
-2. Start one live voice call and confirm the opening line speaks with the Sarvam voice.
+2. Start one live voice call and confirm the opening line speaks with the ElevenLabs voice.
 3. Interrupt the agent once and confirm the call keeps listening.
 4. Switch from Hindi to English and confirm the next turn actually changes language.
-5. Open the pricing panel and confirm both `Sarvam Speech` and `GPT Policy` show non-zero usage after a real turn.
+5. Open the pricing panel and confirm both `Voice (TTS + STT)` and `GPT Policy` show non-zero usage after a real turn.
 
 ## Exotel phone demo
 
@@ -105,7 +88,7 @@ This repo now supports Exotel as a pure telephony layer for the existing app:
 
 - Exotel places the PSTN call.
 - Exotel streams call audio to `wss://<your-render-url>/api/exotel/media`.
-- The backend keeps using the same Sarvam STT/TTS + GPT collections flow.
+- The backend keeps using the same ElevenLabs TTS + OpenAI STT + GPT collections flow.
 - Post-call summary, tool calls, and cost logging still run in the backend.
 
 ### Render setup for Exotel

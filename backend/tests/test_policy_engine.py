@@ -24,12 +24,12 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(persona["name"], "Yogesh")
         self.assertEqual(persona["gender"], "male")
 
-    def test_default_male_voice_is_shubh(self) -> None:
-        self.assertEqual(policy_app.DEFAULT_REALTIME_VOICE, "shubh")
+    def test_default_male_voice_is_ratan(self) -> None:
+        self.assertEqual(policy_app.DEFAULT_REALTIME_VOICE, "ratan")
 
-    def test_hinglish_stt_prefers_auto_detect(self) -> None:
-        self.assertEqual(policy_app.sarvam_stt_language_code("hinglish"), "unknown")
-        self.assertEqual(policy_app.sarvam_stt_language_code("english"), "en-IN")
+    def test_language_code_mapping(self) -> None:
+        self.assertEqual(policy_app.language_code_for_id("english"), "en-IN")
+        self.assertEqual(policy_app.language_code_for_id("hinglish"), "hi-IN")
 
     def test_plain_english_detector_does_not_misclassify_line_by_line_batao(self) -> None:
         self.assertFalse(policy_app.is_plain_english("line by line batao"))
@@ -84,10 +84,12 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(config["chat_model"], policy_app.CHAT_MODEL)
         self.assertEqual(config["supervisor_model"], policy_app.SUPERVISOR_MODEL)
         self.assertEqual(config["language_coach_model"], policy_app.LANGUAGE_COACH_MODEL)
-        self.assertEqual(config["stt_mode"], policy_app.SARVAM_STT_MODE)
-        self.assertEqual(config["sarvam_voice_preset"]["speaker"], policy_app.DEFAULT_REALTIME_VOICE)
-        self.assertEqual(config["sarvam_voice_preset"]["id"], f"{policy_app.DEFAULT_REALTIME_VOICE}-collections")
-        self.assertEqual(config["pricing_reference"]["sarvam"]["currency"], "INR")
+        self.assertEqual(config["tts_provider"], "elevenlabs")
+        self.assertEqual(config["stt_provider"], "sarvam")
+        self.assertEqual(config["tts_model"], policy_app.ELEVENLABS_TTS_MODEL)
+        self.assertEqual(config["stt_model"], policy_app.SARVAM_STT_MODEL)
+        self.assertEqual(config["pricing_reference"]["elevenlabs"]["currency"], "USD")
+        self.assertEqual(config["pricing_reference"]["sarvam_stt"]["currency"], "INR")
         self.assertEqual(config["pricing_reference"]["openai_currency"], "USD")
         self.assertEqual(config["telephony"]["provider"], "exotel")
         self.assertEqual(config["telephony"]["stream_sample_rate"], policy_app.EXOTEL_STREAM_SAMPLE_RATE)
@@ -533,34 +535,57 @@ class PolicyEngineTests(unittest.TestCase):
     def test_create_session_reuses_requested_cost_session_id(self) -> None:
         client = policy_app.app.test_client()
 
-        response = client.post(
-            "/api/session",
-            json={
-                "session_id": "cost_session_test_123",
-                "language_id": "hinglish",
-            },
-        )
+        # /api/session gates on both voice keys being present.
+        original_eleven = policy_app.ELEVENLABS_API_KEY
+        original_openai = policy_app.OPENAI_API_KEY
+        policy_app.ELEVENLABS_API_KEY = "test-eleven-key"
+        policy_app.OPENAI_API_KEY = "test-openai-key"
+        try:
+            response = client.post(
+                "/api/session",
+                json={
+                    "session_id": "cost_session_test_123",
+                    "language_id": "hinglish",
+                },
+            )
+        finally:
+            policy_app.ELEVENLABS_API_KEY = original_eleven
+            policy_app.OPENAI_API_KEY = original_openai
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["session_id"], "cost_session_test_123")
 
-    def test_prepare_sarvam_tts_text_improves_invoice_speech(self) -> None:
-        spoken = policy_app.prepare_sarvam_tts_text(
+    def test_prepare_tts_text_spells_invoice_ids_digit_by_digit(self) -> None:
+        # Invoice IDs are spoken as letters + individual digits so the voice does
+        # not read them as one giant number.
+        spoken = policy_app.prepare_tts_text(
             "Invoice DHL123456; Invoice DHL654321",
             "en-IN",
+            "english",
+        )
+        self.assertEqual(
+            spoken,
+            "Invoice DHL, one two three four five six. Invoice DHL, six five four three two one",
         )
 
-        # Long IDs get a comma pause so the voice does not machine-gun the digits.
-        self.assertEqual(spoken, "Invoice DHL, 123456. Invoice DHL, 654321")
-
-    def test_prepare_sarvam_tts_text_preserves_number_commas(self) -> None:
-        spoken = policy_app.prepare_sarvam_tts_text(
+    def test_prepare_tts_text_currency_keeps_digits_with_rupees(self) -> None:
+        # INR amounts become Indian-grouped DIGITS + "Rupees"; ElevenLabs text
+        # normalization speaks the number (consistent; the old English-word
+        # spelling was occasionally misheard as "seventy-seven").
+        spoken = policy_app.prepare_tts_text(
             "Outstanding amount is INR 57,920.",
             "en-IN",
+            "english",
         )
+        self.assertEqual(spoken, "Outstanding amount is 57,920 Rupees.")
 
-        self.assertEqual(spoken, "Outstanding amount is INR 57,920.")
+    def test_prepare_tts_text_currency_for_hindi_digits_and_rupees(self) -> None:
+        # Hindi reply: amount stays as digits + "Rupees" (no INR), spoken
+        # in-language by normalization.
+        spoken = policy_app.prepare_tts_text("कुल बकाया 57920 रुपये है।", "hi-IN", "hindi")
+        self.assertIn("57,920 Rupees", spoken)
+        self.assertNotIn("INR", spoken)
 
     def test_load_call_history_serializes_backend_log_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -594,14 +619,12 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(history[0]["summary"]["headline"], "Demo call")
         self.assertEqual(history[0]["durationSec"], 42)
 
-    def test_localized_sarvam_voice_prefers_language_specific_speaker(self) -> None:
-        self.assertEqual(policy_app.localized_sarvam_voice("ratan", "hi-IN"), "shubh")
-        self.assertEqual(policy_app.localized_sarvam_voice("priya", "bn-IN"), "roopa")
-        self.assertEqual(policy_app.localized_sarvam_voice("ratan", "en-IN"), "aditya")
-
-    def test_sarvam_tts_pace_uses_english_override(self) -> None:
-        self.assertEqual(policy_app.sarvam_tts_pace("en-IN", "shubh"), policy_app.SARVAM_TTS_PACE_ENGLISH)
-        self.assertEqual(policy_app.sarvam_tts_pace("hi-IN", "shubh"), policy_app.SARVAM_TTS_PACE)
+    def test_elevenlabs_voice_id_resolves_by_persona_gender(self) -> None:
+        # Female personas resolve to the female default, male to the male default.
+        self.assertEqual(policy_app.elevenlabs_voice_id("priya"), policy_app.ELEVENLABS_DEFAULT_FEMALE)
+        self.assertEqual(policy_app.elevenlabs_voice_id("ratan"), policy_app.ELEVENLABS_DEFAULT_MALE)
+        # Unknown voice falls back to the default persona (male).
+        self.assertEqual(policy_app.elevenlabs_voice_id("nope"), policy_app.ELEVENLABS_DEFAULT_MALE)
 
     def test_scrub_forbidden_payment_methods_preserves_cash_flow_language(self) -> None:
         cleaned = policy_app.scrub_forbidden_payment_methods(

@@ -133,7 +133,7 @@ export function resetCostLedger(body?: { model?: string; transcription_model?: s
 export function recordCostEvent(body: {
   event_id: string
   session_id: string
-  source: 'agent' | 'supervisor' | 'language_coach' | 'sarvam'
+  source: 'agent' | 'supervisor' | 'language_coach' | 'voice'
   usage_type: 'response' | 'transcription' | 'tts' | 'stt'
   model: string
   usage: Record<string, unknown>
@@ -187,6 +187,7 @@ export function chatTurn(body: {
     tool_calls: ToolCallEntry[]
     costs: CostState
     model: string
+    tone?: string
   }>('/api/chat/turn', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -209,6 +210,7 @@ export function customerTurn(body: {
     tool_calls: ToolCallEntry[]
     costs: CostState
     model: string
+    tone?: string
   }>('/api/turn/customer', {
     method: 'POST',
     body: JSON.stringify(body),

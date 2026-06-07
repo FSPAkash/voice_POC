@@ -134,15 +134,15 @@ class CostAccountingTests(unittest.TestCase):
         )
         self.assertTrue(math.isclose(cost, expected, rel_tol=0, abs_tol=1e-12))
 
-    def test_sarvam_tts_cost_matches_bulbul_v3_rate(self) -> None:
-        cost, token_map = pricing_app.sarvam_tts_cost_from_chars("bulbul:v3", 10_000)
+    def test_tts_cost_matches_elevenlabs_rate(self) -> None:
+        cost, token_map = pricing_app.tts_cost_from_chars("eleven_v3", 10_000)
 
         self.assertEqual(token_map, {"text_output_tokens": 10_000})
-        expected = 10_000 * pricing_app.PRICE_TABLE["bulbul:v3"]["text_output_per_million"] / 1_000_000
+        expected = 10_000 * pricing_app.PRICE_TABLE["eleven_v3"]["text_output_per_million"] / 1_000_000
         self.assertTrue(math.isclose(cost, expected, rel_tol=0, abs_tol=1e-12))
 
-    def test_sarvam_stt_cost_rounds_up_to_nearest_second(self) -> None:
-        cost, token_map = pricing_app.sarvam_stt_cost_from_seconds("saaras:v3", 0.2)
+    def test_stt_cost_rounds_up_to_nearest_second(self) -> None:
+        cost, token_map = pricing_app.stt_cost_from_seconds("saaras:v3", 0.2)
 
         self.assertEqual(token_map, {"audio_input_tokens": 1})
         expected = pricing_app.PRICE_TABLE["saaras:v3"]["audio_input_per_million"] / 1_000_000
@@ -150,7 +150,7 @@ class CostAccountingTests(unittest.TestCase):
 
     def test_current_stack_pricing_snapshot_matches_ledger_math(self) -> None:
         ledger = pricing_app.default_ledger(
-            realtime_model="bulbul:v3",
+            realtime_model="eleven_v3",
             transcription_model="saaras:v3",
         )
         ledger["agent"]["response_usage"]["text_output_tokens"] = 239
@@ -169,10 +169,10 @@ class CostAccountingTests(unittest.TestCase):
 
         snapshot = pricing_app.current_stack_pricing_snapshot(ledger)
 
-        self.assertEqual(snapshot["stack"]["tts_model"], pricing_app.SARVAM_TTS_MODEL)
+        self.assertEqual(snapshot["stack"]["tts_model"], pricing_app.ELEVENLABS_TTS_MODEL)
         self.assertEqual(snapshot["stack"]["stt_model"], pricing_app.SARVAM_STT_MODEL)
-        self.assertEqual(snapshot["observed"]["sarvam_tts_chars"], 239)
-        self.assertEqual(snapshot["observed"]["sarvam_stt_seconds"], 3)
+        self.assertEqual(snapshot["observed"]["tts_chars"], 239)
+        self.assertEqual(snapshot["observed"]["stt_seconds"], 3)
         self.assertEqual(snapshot["observed"]["chat_input_tokens"], 8910)
         self.assertEqual(snapshot["observed"]["chat_cached_input_tokens"], 0)
         self.assertEqual(snapshot["observed"]["combined_units"], 9288)

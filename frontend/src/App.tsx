@@ -39,7 +39,7 @@ import {
   extractRealtimeFunctionCalls,
   extractRealtimeText,
 } from './lib/realtime'
-import { SarvamVoiceClient, type SarvamSessionConfig } from './lib/sarvam'
+import { VoiceClient, type VoiceSessionConfig } from './lib/voice'
 
 // Extract "LINE TO SPEAK (verbatim): xxx" payload from buildScriptedResponse output.
 function extractSpokenLine(event: Record<string, unknown>): string {
@@ -80,15 +80,6 @@ type PricingCard = {
 
 type CallRecord = CallHistoryRecord
 
-function formatInrRate(amount: number): string {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(amount)
-}
-
 function formatUsdRate(amount: number): string {
   return `$${amount.toFixed(2)}`
 }
@@ -96,7 +87,7 @@ function formatUsdRate(amount: number): string {
 type CostEventPayload = {
   event_id: string
   session_id: string
-  source: 'agent' | 'supervisor' | 'language_coach' | 'sarvam'
+  source: 'agent' | 'supervisor' | 'language_coach' | 'voice'
   usage_type: 'response' | 'transcription' | 'tts' | 'stt'
   model: string
   usage: Record<string, unknown>
@@ -436,8 +427,8 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null)
-  const sarvamClientRef = useRef<SarvamVoiceClient | null>(null)
-  const sarvamSessionRef = useRef<SarvamSessionConfig | null>(null)
+  const voiceClientRef = useRef<VoiceClient | null>(null)
+  const voiceSessionRef = useRef<VoiceSessionConfig | null>(null)
   // Turn-commit debounce: buffer rapid fragments from STT into one logical
   // customer turn before firing the policy engine. Keep this short so the call
   // never feels dropped between the customer's turn and the agent response.
@@ -464,6 +455,9 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const streamingViolationCancelledRef = useRef(false)
   const discardCurrentResponseRef = useRef(false)
   const lastApprovedScriptRef = useRef<string>('')
+  // Delivery tone for the next spoken reply (from /api/chat/turn). Drives the
+  // eleven_v3 audio tag (empathetic/firm/professional) on the backend TTS proxy.
+  const currentToneRef = useRef<string>('')
   const turnNumberRef = useRef(0)
   const bootstrapRequestIdRef = useRef(0)
   const callStartRef = useRef<number | null>(null)
@@ -681,7 +675,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
     setCosts(payload.costs)
     setCallHistory(Array.isArray(payload.call_history) ? payload.call_history : [])
     const defaultLanguageId = payload.config.default_language_id ?? 'hinglish'
-    const defaultRealtimeModel = payload.config.realtime_model ?? 'bulbul:v3'
+    const defaultRealtimeModel = payload.config.realtime_model ?? 'eleven_flash_v2_5'
     setSelectedLanguageId(defaultLanguageId)
     setActiveLanguageId(defaultLanguageId)
     setSelectedRealtimeModel(defaultRealtimeModel)
@@ -959,17 +953,17 @@ export default function App({ username, onLogout }: AppProps = {}) {
   }
 
   // Shim: original code posted realtime events over an OpenAI WebRTC data
-  // channel. With Sarvam we only need `response.create` (-> speak text) and
+  // channel. Now we only need `response.create` (-> speak text) and
   // `response.cancel` (-> stop playback). `session.update` and other event
-  // types are no-ops; the Sarvam config is set once at connect.
+  // types are no-ops; the voice config is set once at connect.
   const sendRealtimeEvent = (event: Record<string, unknown>) => {
-    const client = sarvamClientRef.current
+    const client = voiceClientRef.current
     if (!client) return
     const type = String(event.type ?? '')
     if (type === 'response.create') {
       const line = extractSpokenLine(event)
       if (!line) return
-      const langCode = sarvamLangCodeFor(activeLanguageRef.current)
+      const langCode = voiceLangCodeFor(activeLanguageRef.current)
       const utteranceId = client.speak(line, langCode)
       // Synth the realtime-style created event so the legacy state machine
       // bookkeeps activeResponseIdRef correctly.
@@ -984,11 +978,11 @@ export default function App({ username, onLogout }: AppProps = {}) {
       void handleRealtimeEvent({ type: 'response.cancelled' })
       return
     }
-    // session.update etc. — Sarvam handles language per-utterance; ignore.
+    // session.update etc. — language is handled per-utterance; ignore.
   }
 
-  const sarvamLangCodeFor = (languageId: string): string => {
-    const map = bootstrapRef.current?.config.sarvam_language_codes
+  const voiceLangCodeFor = (languageId: string): string => {
+    const map = bootstrapRef.current?.config.language_codes
     if (map && map[languageId]) return map[languageId]
     if (languageId === 'english') return 'en-IN'
     if (languageId === 'bengali') return 'bn-IN'
@@ -997,10 +991,10 @@ export default function App({ username, onLogout }: AppProps = {}) {
     return 'hi-IN'
   }
 
-  const languageIdForSarvamCode = (languageCode: string): string | null => {
+  const languageIdForCode = (languageCode: string): string | null => {
     const normalized = languageCode.trim()
     if (!normalized) return null
-    const map = bootstrapRef.current?.config.sarvam_language_codes
+    const map = bootstrapRef.current?.config.language_codes
     if (map) {
       const entry = Object.entries(map).find(([, value]) => value === normalized)
       if (entry && entry[0] !== 'hinglish' && entry[0] !== 'hindi') {
@@ -1128,6 +1122,8 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
       if (result.assistant_text && result.assistant_text.trim()) {
         lastApprovedScriptRef.current = result.assistant_text
+        currentToneRef.current = result.tone || ''
+        voiceClientRef.current?.setTone(result.tone || '')
         queueResponseCreate(buildScriptedResponse(result.assistant_text))
         pushAgentActivity({
           agent: 'caller',
@@ -1280,6 +1276,8 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
       if (result.assistant_text && result.assistant_text.trim()) {
         lastApprovedScriptRef.current = result.assistant_text
+        currentToneRef.current = result.tone || ''
+        voiceClientRef.current?.setTone(result.tone || '')
         queueResponseCreate(buildScriptedResponse(result.assistant_text))
         pushAgentActivity({
           agent: 'caller',
@@ -1627,7 +1625,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
           session_id: costsRef.current.session_id || bootstrapRef.current?.costs.session_id || '',
           source: 'agent',
           usage_type: 'response',
-          model: selectedRealtimeModelRef.current || bootstrapRef.current?.config.realtime_model || 'bulbul:v3',
+          model: selectedRealtimeModelRef.current || bootstrapRef.current?.config.realtime_model || 'eleven_flash_v2_5',
           usage: usage as Record<string, unknown>,
         })
       }
@@ -1776,9 +1774,9 @@ export default function App({ username, onLogout }: AppProps = {}) {
     turnCommitBufferRef.current = []
     pendingBargeInRef.current = null
     policyReplyRequestSeqRef.current += 1
-    sarvamClientRef.current?.disconnect()
-    sarvamClientRef.current = null
-    sarvamSessionRef.current = null
+    voiceClientRef.current?.disconnect()
+    voiceClientRef.current = null
+    voiceSessionRef.current = null
     localStreamRef.current?.getTracks().forEach((track) => track.stop())
     localStreamRef.current = null
     if (remoteAudioRef.current) {
@@ -1843,9 +1841,9 @@ export default function App({ username, onLogout }: AppProps = {}) {
       })
 
       if (!session.session_id) {
-        throw new Error('Sarvam session did not return a session_id.')
+        throw new Error('Voice session did not return a session_id.')
       }
-      sarvamSessionRef.current = session
+      voiceSessionRef.current = session
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -1857,8 +1855,8 @@ export default function App({ username, onLogout }: AppProps = {}) {
       localStreamRef.current = stream
       startMicMeter(stream)
 
-      const client = new SarvamVoiceClient()
-      sarvamClientRef.current = client
+      const client = new VoiceClient()
+      voiceClientRef.current = client
 
       const utteranceTextById = new Map<string, string>()
       const dispatchSpoken = (utteranceId: string, chars: number) => {
@@ -1886,7 +1884,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
         void applyCostUpdate({
           event_id: `tts_${utteranceId}`,
           session_id: sessionId,
-          source: 'sarvam',
+          source: 'voice',
           usage_type: 'tts',
           model: session.tts_model,
           usage: {},
@@ -1941,7 +1939,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
           // Language switch detection still runs per-fragment so the next
           // agent turn uses the right TTS voice.
-          const mapped = languageIdForSarvamCode(languageCode)
+          const mapped = languageIdForCode(languageCode)
           if (mapped && mapped !== activeLanguageRef.current) {
             activeLanguageRef.current = mapped
             const nextAdvice = defaultLanguageAdvice(mapped)
@@ -1990,7 +1988,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
           }, turnCommitDelayMs)
         },
         onError: (message) => {
-          appendSystemTranscript(`Sarvam error: ${message}`)
+          appendSystemTranscript(`Voice error: ${message}`)
         },
         onDisconnect: () => {
           if (callStateRef.current !== 'ending') {
@@ -2265,7 +2263,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
   const isLive = callState === 'connected'
   const supportedRealtimeModels =
     bootstrap?.config.supported_realtime_models ?? [
-      { id: 'bulbul:v3', label: 'Sarvam Bulbul v3' },
+      { id: 'eleven_flash_v2_5', label: 'ElevenLabs Flash v2.5' },
     ]
   const selectedRealtimeModelLabel = realtimeModelLabel(
     supportedRealtimeModels,
@@ -2277,36 +2275,12 @@ export default function App({ username, onLogout }: AppProps = {}) {
     supportedLanguages,
     languageAdvice.detected_language_id || activeLanguageId,
   )
-  const sarvamPricingReference = bootstrap?.config.pricing_reference?.sarvam
-  const sarvamPricingCards: PricingCard[] = []
   const ttsModelId = bootstrap?.config.tts_model ?? selectedRealtimeModel
-  if (sarvamPricingReference) {
-    const ttsInr = sarvamPricingReference.tts_inr_per_10k_chars[ttsModelId]
-    if (typeof ttsInr === 'number') {
-      sarvamPricingCards.push({
-        id: 'sarvam-tts',
-        title: 'Voice synthesis',
-        model: ttsModelId,
-        active: ttsModelId === selectedRealtimeModel,
-        lines: [`Text out ${formatInrRate(ttsInr)}/10k chars`],
-      })
-    }
-
-    const sttModelId =
-      bootstrap?.config.stt_model ??
-      bootstrap?.config.transcription_model ??
-      costs.agent.transcription_usage.model ??
-      'saaras:v3'
-    const sttInr = sarvamPricingReference.stt_inr_per_hour[sttModelId]
-    if (typeof sttInr === 'number') {
-      sarvamPricingCards.push({
-        id: 'sarvam-stt',
-        title: 'Transcription',
-        model: sttModelId,
-        lines: [`Audio in ${formatInrRate(sttInr)}/hour`],
-      })
-    }
-  }
+  const sttModelId =
+    bootstrap?.config.stt_model ??
+    bootstrap?.config.transcription_model ??
+    costs.agent.transcription_usage.model ??
+    'gpt-4o-mini-transcribe'
 
   const buildUsdModelCard = (id: string, title: string, modelId: string): PricingCard | null => {
     const pricing = costs.price_table[modelId] ?? {}
@@ -2343,9 +2317,11 @@ export default function App({ username, onLogout }: AppProps = {}) {
     buildUsdModelCard('supervisor-pricing', 'Supervisor', bootstrap?.config.supervisor_model ?? costs.supervisor.model),
     buildUsdModelCard('language-coach-pricing', 'Language coach', bootstrap?.config.language_coach_model ?? costs.language_coach.model),
   ].filter((card): card is PricingCard => Boolean(card))
-  const sarvamPricingNote = sarvamPricingReference
-    ? `Sarvam speech pricing is shown in INR. Ledger totals are still normalized to USD using ₹${sarvamPricingReference.inr_per_usd.toFixed(2)} per USD.`
-    : null
+  const voicePricingCards = [
+    buildUsdModelCard('tts-pricing', 'Voice synthesis (ElevenLabs)', ttsModelId),
+    buildUsdModelCard('stt-pricing', 'Transcription (OpenAI)', sttModelId),
+  ].filter((card): card is PricingCard => Boolean(card))
+  const voicePricingNote = 'Voice: ElevenLabs Flash v2.5 (TTS) + OpenAI realtime (STT). All rates in USD.'
   const policyStackCostUsd =
     (costs.chat_agent?.estimated_cost_usd ?? 0) +
     costs.supervisor.estimated_cost_usd +
@@ -2884,7 +2860,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                 <>
                 <div className="cost-block">
                   <div className="cost-block__head">
-                    <span>Sarvam Speech</span>
+                    <span>Voice (TTS + STT)</span>
                     <small>{`${costs.agent.model} + ${bootstrap?.config.transcription_model ?? costs.agent.transcription_usage.model}`}</small>
                   </div>
                   <div className="cost-block__value">{formatUsd(costs.agent.estimated_cost_usd)}</div>
@@ -3097,14 +3073,14 @@ export default function App({ username, onLogout }: AppProps = {}) {
                     </div>
                   </div>
                   <div className="pricing-stack">
-                    {isClient ? null : sarvamPricingCards.length > 0 ? (
+                    {isClient ? null : voicePricingCards.length > 0 ? (
                       <div className="pricing-section">
                         <div className="pricing-section__head">
-                          <span className="card__eyebrow">Sarvam Speech Pricing</span>
-                          <span>INR reference</span>
+                          <span className="card__eyebrow">Voice Pricing</span>
+                          <span>USD reference</span>
                         </div>
                         <div className="realtime-rate-grid">
-                          {sarvamPricingCards.map((card) => (
+                          {voicePricingCards.map((card) => (
                             <div
                               className={`realtime-rate-card${card.active ? ' realtime-rate-card--active' : ''}`}
                               key={card.id}
@@ -3121,7 +3097,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                             </div>
                           ))}
                         </div>
-                        {sarvamPricingNote ? <div className="pricing-note">{sarvamPricingNote}</div> : null}
+                        {voicePricingNote ? <div className="pricing-note">{voicePricingNote}</div> : null}
                       </div>
                     ) : null}
                     {isClient ? null : usdPricingCards.length > 0 ? (

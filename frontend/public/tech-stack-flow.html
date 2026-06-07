@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DHL POC Agent Execution Flow</title>
+    <style>
+      :root {
+        --bg: #f6f3ec;
+        --panel: #fffdf8;
+        --ink: #171715;
+        --muted: #66655f;
+        --line: #d9d3c7;
+        --red: #d40511;
+        --red-soft: #f6d7db;
+        --yellow: #ffcc00;
+        --yellow-soft: #fff2b8;
+        --blue: #214f7a;
+        --blue-soft: #d9e8f5;
+        --green: #1f7a4d;
+        --green-soft: #d9f0e4;
+        --shadow: 0 24px 60px rgba(33, 30, 24, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at top left, rgba(255, 204, 0, 0.26), transparent 24%),
+          radial-gradient(circle at top right, rgba(212, 5, 17, 0.1), transparent 26%),
+          linear-gradient(180deg, #fcfbf8 0%, var(--bg) 100%);
+        color: var(--ink);
+        font-family: "Aptos", "Segoe UI", Arial, sans-serif;
+      }
+
+      body {
+        padding: 14px;
+      }
+
+      .page {
+        max-width: 1680px;
+        margin: 0 auto;
+        background: rgba(255, 253, 248, 0.94);
+        border: 1px solid rgba(217, 211, 199, 0.9);
+        border-radius: 30px;
+        overflow: hidden;
+        box-shadow: var(--shadow);
+      }
+
+      .head {
+        padding: 20px 24px 16px;
+        border-bottom: 1px solid var(--line);
+        background:
+          linear-gradient(135deg, rgba(255, 204, 0, 0.18), rgba(255, 255, 255, 0)),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.88));
+      }
+
+      .eyebrow {
+        display: inline-block;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(23, 23, 21, 0.06);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 12px 0 8px;
+        font-size: clamp(30px, 3.2vw, 48px);
+        line-height: 0.98;
+        letter-spacing: -0.05em;
+      }
+
+      .head p {
+        margin: 0;
+        max-width: 1100px;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.5;
+      }
+
+      .canvas {
+        padding: 14px 14px 4px;
+      }
+
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .foot {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 20px 20px;
+        border-top: 1px solid rgba(217, 211, 199, 0.85);
+      }
+
+      .chip {
+        padding: 8px 11px;
+        border-radius: 999px;
+        background: rgba(23, 23, 21, 0.05);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="head">
+        <span class="eyebrow">One-Page Technical Flow</span>
+        <h1>Caller Audio In -> Grounded Policy Decision -> ElevenLabs Voice Back Out</h1>
+        <p>
+          This page only shows the live execution path. Audio comes in from browser or phone, gets
+          transcribed by OpenAI Realtime STT, is assembled into a grounded turn, then our backend decides
+          the next line using deterministic policy plus OpenAI chat. Only after that exact line is approved
+          do we call ElevenLabs to speak it back.
+        </p>
+      </section>
+
+      <section class="canvas">
+        <svg viewBox="0 0 1800 960" role="img" aria-label="Engineering flow from caller audio to agent reasoning to ElevenLabs playback">
+          <defs>
+            <marker id="arrow-red" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto">
+              <path d="M0,0 L14,7 L0,14 Z" fill="#d40511"></path>
+            </marker>
+            <marker id="arrow-blue" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto">
+              <path d="M0,0 L14,7 L0,14 Z" fill="#214f7a"></path>
+            </marker>
+            <marker id="arrow-green" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto">
+              <path d="M0,0 L14,7 L0,14 Z" fill="#1f7a4d"></path>
+            </marker>
+            <style>
+              .lane {
+                fill: rgba(255,255,255,0.46);
+                stroke: #d9d3c7;
+                stroke-width: 1.2;
+              }
+              .box {
+                fill: #fffdf8;
+                stroke: #d9d3c7;
+                stroke-width: 1.6;
+                rx: 24;
+                ry: 24;
+              }
+              .box-red {
+                fill: #fff7f8;
+                stroke: #e6bcc2;
+              }
+              .box-blue {
+                fill: #f8fbff;
+                stroke: #c7dced;
+              }
+              .box-green {
+                fill: #f8fffb;
+                stroke: #c5e3d4;
+              }
+              .box-yellow {
+                fill: #fffdf2;
+                stroke: #eadc9a;
+              }
+              .step {
+                font: 700 13px 'Aptos', 'Segoe UI', Arial, sans-serif;
+                fill: #d40511;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+              }
+              .title {
+                font: 700 19px 'Aptos', 'Segoe UI', Arial, sans-serif;
+                fill: #171715;
+              }
+              .line {
+                font: 13px 'Aptos', 'Segoe UI', Arial, sans-serif;
+                fill: #66655f;
+              }
+              .strong {
+                font: 700 13px 'Aptos', 'Segoe UI', Arial, sans-serif;
+                fill: #214f7a;
+              }
+              .mono {
+                font: 12px Consolas, 'Courier New', monospace;
+                fill: #214f7a;
+              }
+              .label {
+                font: 12px 'Aptos', 'Segoe UI', Arial, sans-serif;
+                fill: #66655f;
+              }
+              .center-note {
+                font: 700 14px 'Aptos', 'Segoe UI', Arial, sans-serif;
+                fill: #1f7a4d;
+              }
+            </style>
+          </defs>
+
+          <rect x="18" y="18" width="1764" height="924" rx="28" ry="28" class="lane"></rect>
+
+          <g transform="translate(54 110)">
+            <rect width="226" height="196" class="box box-yellow"></rect>
+            <text x="18" y="30" class="step">Input A</text>
+            <text x="18" y="60" class="title">Browser caller</text>
+            <text x="18" y="90" class="line">React UI + VoiceClient</text>
+            <text x="18" y="110" class="line">mic worklet + VAD + barge-in</text>
+            <text x="18" y="130" class="mono">PCM16 mono @ 24kHz</text>
+            <text x="18" y="152" class="mono">WS -> /api/stt/stream</text>
+            <text x="18" y="176" class="line">Customer speaks in browser</text>
+          </g>
+
+          <g transform="translate(54 372)">
+            <rect width="226" height="196" class="box box-yellow"></rect>
+            <text x="18" y="30" class="step">Input B</text>
+            <text x="18" y="60" class="title">Phone caller</text>
+            <text x="18" y="90" class="line">Exotel PSTN call</text>
+            <text x="18" y="110" class="line">base64 audio over media WS</text>
+            <text x="18" y="130" class="mono">mono PCM @ 8kHz</text>
+            <text x="18" y="152" class="mono">WS -> /api/exotel/media</text>
+            <text x="18" y="176" class="line">Customer speaks on phone</text>
+          </g>
+
+          <g transform="translate(344 238)">
+            <rect width="250" height="204" class="box box-blue"></rect>
+            <text x="18" y="30" class="step">Step 1</text>
+            <text x="18" y="60" class="title">Speech ingress</text>
+            <text x="18" y="92" class="line">Browser path forwards PCM directly.</text>
+            <text x="18" y="112" class="line">Phone path uses</text>
+            <text x="18" y="132" class="mono">PhoneCallSession.forward_audio()</text>
+            <text x="18" y="154" class="line">and resamples 8kHz -> 24kHz</text>
+            <text x="18" y="176" class="line">so both paths reach the same STT shape.</text>
+          </g>
+
+          <g transform="translate(658 238)">
+            <rect width="252" height="204" class="box box-blue"></rect>
+            <text x="18" y="30" class="step">Step 2</text>
+            <text x="18" y="60" class="title">OpenAI Realtime STT</text>
+            <text x="18" y="92" class="mono">intent=transcription</text>
+            <text x="18" y="114" class="mono">input_audio_buffer.append/commit/clear</text>
+            <text x="18" y="140" class="line">returns partial transcript events</text>
+            <text x="18" y="160" class="line">and final transcript events</text>
+            <text x="18" y="182" class="line">Speech-in only. It does not decide what to say.</text>
+          </g>
+
+          <g transform="translate(974 238)">
+            <rect width="270" height="204" class="box box-blue"></rect>
+            <text x="18" y="30" class="step">Step 3</text>
+            <text x="18" y="60" class="title">Turn assembly</text>
+            <text x="18" y="92" class="line">Recent fragments are merged into one</text>
+            <text x="18" y="112" class="line">logical customer turn.</text>
+            <text x="18" y="138" class="mono">POST /api/turn/customer</text>
+            <text x="18" y="160" class="line">payload includes transcript, messages,</text>
+            <text x="18" y="180" class="line">recent_transcript, voice, account, languages</text>
+          </g>
+
+          <g transform="translate(1308 148)">
+            <rect width="430" height="392" class="box box-red"></rect>
+            <text x="22" y="30" class="step">Step 4</text>
+            <text x="22" y="62" class="title">Backend brain: how the agent thinks</text>
+
+            <text x="22" y="100" class="strong">Language framing first</text>
+            <text x="22" y="120" class="line">create_language_coach_review() decides reply language</text>
+            <text x="22" y="138" class="line">and sends language advice into the turn.</text>
+
+            <text x="22" y="178" class="strong">Main decision function</text>
+            <text x="22" y="198" class="mono">run_chat_agent_turn()</text>
+            <text x="22" y="220" class="line">1. tries fast deterministic route when possible</text>
+            <text x="22" y="238" class="line">2. otherwise calls the OpenAI chat model</text>
+            <text x="22" y="256" class="line">3. falls back to deterministic reply if LLM fails</text>
+
+            <text x="22" y="296" class="strong">LLM output contract</text>
+            <text x="22" y="316" class="mono">{ intent, reply, language, tool_calls[] }</text>
+            <text x="22" y="338" class="line">Only one approved reply string survives this step.</text>
+
+            <text x="22" y="378" class="strong">Deterministic safety net</text>
+            <text x="22" y="398" class="mono">generate_collections_reply()</text>
+            <text x="22" y="420" class="line">keeps the call moving if the model fails or violates rules.</text>
+          </g>
+
+          <g transform="translate(1308 594)">
+            <rect width="206" height="236" class="box box-green"></rect>
+            <text x="18" y="30" class="step">Feeds Brain</text>
+            <text x="18" y="60" class="title">Ground truth</text>
+            <text x="18" y="92" class="mono">GROUND_TRUTH.md</text>
+            <text x="18" y="114" class="line">canonical source of truth</text>
+            <text x="18" y="140" class="mono">build_grounded_context()</text>
+            <text x="18" y="162" class="line">adds live customer, invoices,</text>
+            <text x="18" y="180" class="line">payment methods, notes, totals</text>
+            <text x="18" y="206" class="line">The model is told these are the</text>
+            <text x="18" y="224" class="line">only facts it may speak.</text>
+          </g>
+
+          <g transform="translate(1532 594)">
+            <rect width="206" height="236" class="box box-green"></rect>
+            <text x="18" y="30" class="step">Constrains Brain</text>
+            <text x="18" y="60" class="title">Policy + guardrails</text>
+            <text x="18" y="92" class="line">validate_tool_args()</text>
+            <text x="18" y="112" class="line">for tool permissions and shape</text>
+            <text x="18" y="138" class="line">scrub_forbidden_payment_methods()</text>
+            <text x="18" y="156" class="line">scrub_invented_invoice_numbers()</text>
+            <text x="18" y="174" class="line">reply_has_invented_amount()</text>
+            <text x="18" y="192" class="line">english lock repair / fallback</text>
+            <text x="18" y="218" class="line">Policy is decided in our backend.</text>
+          </g>
+
+          <g transform="translate(344 684)">
+            <rect width="260" height="162" class="box box-red"></rect>
+            <text x="18" y="30" class="step">Step 5</text>
+            <text x="18" y="60" class="title">Approved reply only</text>
+            <text x="18" y="92" class="line">The backend returns one exact</text>
+            <text x="18" y="112" class="line">assistant_text plus tool_calls.</text>
+            <text x="18" y="138" class="center-note">This exact text is what gets spoken.</text>
+          </g>
+
+          <g transform="translate(668 654)">
+            <rect width="290" height="222" class="box box-red"></rect>
+            <text x="18" y="30" class="step">Step 6</text>
+            <text x="18" y="60" class="title">Speech preparation + ElevenLabs TTS</text>
+            <text x="18" y="92" class="mono">prepare_tts_text()</text>
+            <text x="18" y="114" class="line">humanizes dates, amounts, and pauses</text>
+            <text x="18" y="140" class="mono">POST /v1/text-to-speech/{voice_id}/stream</text>
+            <text x="18" y="162" class="line">Browser asks for PCM @ 24kHz</text>
+            <text x="18" y="180" class="line">Phone asks for PCM @ 8kHz</text>
+            <text x="18" y="204" class="line">ElevenLabs speaks. It does not choose content.</text>
+          </g>
+
+          <g transform="translate(1022 684)">
+            <rect width="238" height="162" class="box box-yellow"></rect>
+            <text x="18" y="30" class="step">Output A</text>
+            <text x="18" y="60" class="title">Back to browser</text>
+            <text x="18" y="92" class="mono">/api/tts/stream</text>
+            <text x="18" y="114" class="line">audio_start -> PCM16LE -> audio_end</text>
+            <text x="18" y="138" class="line">playback worklet speaks to caller</text>
+          </g>
+
+          <g transform="translate(1308 684)">
+            <rect width="238" height="162" class="box box-yellow"></rect>
+            <text x="18" y="30" class="step">Output B</text>
+            <text x="18" y="60" class="title">Back to phone caller</text>
+            <text x="18" y="92" class="line">PhoneCallSession streams PCM back</text>
+            <text x="18" y="112" class="line">to Exotel media WebSocket</text>
+            <text x="18" y="136" class="line">caller hears the approved line</text>
+          </g>
+
+          <line x1="280" y1="208" x2="344" y2="290" stroke="#d40511" stroke-width="4" marker-end="url(#arrow-red)"></line>
+          <line x1="280" y1="470" x2="344" y2="390" stroke="#d40511" stroke-width="4" marker-end="url(#arrow-red)"></line>
+          <text x="276" y="178" class="label">audio in</text>
+          <text x="276" y="506" class="label">audio in</text>
+
+          <line x1="594" y1="340" x2="658" y2="340" stroke="#214f7a" stroke-width="4" marker-end="url(#arrow-blue)"></line>
+          <text x="608" y="326" class="label">same STT path</text>
+
+          <line x1="910" y1="340" x2="974" y2="340" stroke="#214f7a" stroke-width="4" marker-end="url(#arrow-blue)"></line>
+          <text x="922" y="326" class="label">final transcript</text>
+
+          <line x1="1244" y1="340" x2="1308" y2="340" stroke="#d40511" stroke-width="4" marker-end="url(#arrow-red)"></line>
+          <text x="1258" y="326" class="label">messages + language advice</text>
+
+          <line x1="1411" y1="594" x2="1411" y2="540" stroke="#1f7a4d" stroke-width="3.5" marker-end="url(#arrow-green)"></line>
+          <line x1="1635" y1="594" x2="1635" y2="540" stroke="#1f7a4d" stroke-width="3.5" marker-end="url(#arrow-green)"></line>
+          <text x="1368" y="572" class="label">facts feed decision</text>
+          <text x="1582" y="572" class="label">rules constrain decision</text>
+
+          <line x1="1308" y1="760" x2="958" y2="760" stroke="#1f7a4d" stroke-width="4" marker-end="url(#arrow-green)"></line>
+          <text x="1080" y="748" class="label">assistant_text only</text>
+
+          <line x1="604" y1="764" x2="668" y2="764" stroke="#d40511" stroke-width="4" marker-end="url(#arrow-red)"></line>
+          <text x="616" y="748" class="label">approved text</text>
+
+          <line x1="958" y1="764" x2="1022" y2="764" stroke="#1f7a4d" stroke-width="4" marker-end="url(#arrow-green)"></line>
+          <line x1="958" y1="764" x2="1308" y2="764" stroke="#1f7a4d" stroke-width="4" marker-end="url(#arrow-green)"></line>
+          <text x="972" y="744" class="label">PCM out</text>
+          <text x="1164" y="784" class="label">same approved reply, different transport</text>
+
+          <text x="54" y="902" class="label">Summary: STT turns speech into text. Our backend decides policy and truth using prompts + ground-truth data + deterministic rules + optional OpenAI reasoning. ElevenLabs only renders the already-approved line back to the caller.</text>
+        </svg>
+      </section>
+
+      <section class="foot">
+        <span class="chip">Thinking functions: <code>create_language_coach_review()</code> -> <code>run_chat_agent_turn()</code> -> <code>llm_collections_turn()</code> / <code>generate_collections_reply()</code></span>
+        <span class="chip">Truth source: <code>GROUND_TRUTH.md</code> + <code>build_grounded_context()</code> from <code>sap_mock.json</code></span>
+        <span class="chip">Voice back path: <code>assistant_text</code> -> <code>prepare_tts_text()</code> -> ElevenLabs stream -> browser or Exotel playback</span>
+      </section>
+    </main>
+  </body>
+</html>

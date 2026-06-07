@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ElevenLabs + OpenAI Demo</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4efe7;
+        --panel: #fffdf8;
+        --ink: #1c1a18;
+        --muted: #746a60;
+        --accent: #b84923;
+        --accent-dark: #8f3517;
+        --line: #e3d9cb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        background:
+          radial-gradient(circle at top left, rgba(184, 73, 35, 0.08), transparent 30%),
+          linear-gradient(180deg, #f9f4ec 0%, var(--bg) 100%);
+        color: var(--ink);
+      }
+
+      .shell {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 32px 20px 40px;
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: clamp(2rem, 3vw, 3rem);
+        line-height: 1;
+      }
+
+      .eyebrow {
+        margin: 0 0 22px;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: 1.1fr 0.9fr;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 18px;
+        box-shadow: 0 10px 24px rgba(28, 26, 24, 0.05);
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 18px;
+        font: inherit;
+        cursor: pointer;
+        background: var(--accent);
+        color: #fff8f3;
+      }
+
+      button.secondary {
+        background: #efe5d8;
+        color: var(--ink);
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .status {
+        margin: 0 0 10px;
+        color: var(--muted);
+      }
+
+      .mode {
+        font-weight: 700;
+        color: var(--accent-dark);
+      }
+
+      .transcript {
+        min-height: 360px;
+        max-height: 520px;
+        overflow: auto;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        padding: 14px;
+        background: #fffaf2;
+      }
+
+      .line {
+        padding: 10px 12px;
+        border-radius: 14px;
+        margin-bottom: 10px;
+      }
+
+      .line.agent {
+        background: rgba(184, 73, 35, 0.09);
+      }
+
+      .line.user {
+        background: rgba(41, 92, 138, 0.08);
+      }
+
+      .line.event {
+        background: rgba(116, 106, 96, 0.08);
+      }
+
+      .speaker {
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+
+      .composer {
+        display: flex;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      input {
+        flex: 1;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 12px 16px;
+        font: inherit;
+        background: #fffdf9;
+      }
+
+      code {
+        font-family: Consolas, "Courier New", monospace;
+      }
+
+      ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+
+      li + li {
+        margin-top: 8px;
+      }
+
+      @media (max-width: 800px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <h1>ElevenLabs Voice + OpenAI Brain</h1>
+      <p class="eyebrow">
+        A grounded DHL-style collections demo. ElevenLabs handles speech. OpenAI decides what to say
+        and when to call tools.
+      </p>
+
+      <div class="grid">
+        <section class="card">
+          <div class="controls">
+            <button id="startBtn">Start conversation</button>
+            <button id="stopBtn" class="secondary" disabled>End conversation</button>
+          </div>
+          <p class="status">
+            Status: <strong id="statusText">disconnected</strong><br />
+            Mode: <span id="modeText" class="mode">idle</span>
+          </p>
+          <div id="transcript" class="transcript"></div>
+          <div class="composer">
+            <input id="textInput" type="text" placeholder="Type instead of speaking if you want..." />
+            <button id="sendBtn" class="secondary" disabled>Send</button>
+          </div>
+        </section>
+
+        <aside class="card">
+          <strong>Suggested prompts</strong>
+          <ul>
+            <li><code>Why are you calling me?</code></li>
+            <li><code>What invoices are pending?</code></li>
+            <li><code>I can pay on 2026-06-09.</code></li>
+            <li><code>Please transfer me to a person.</code></li>
+          </ul>
+          <p>
+            Tool behavior:
+          </p>
+          <ul>
+            <li>The model must call <code>get_customer_context</code> before quoting invoice data.</li>
+            <li>Specific payment dates trigger <code>log_promise_to_pay</code>.</li>
+            <li>Human escalation triggers <code>transfer_to_human</code>.</li>
+          </ul>
+        </aside>
+      </div>
+    </div>
+
+    <script type="module">
+      import { Conversation } from "https://esm.sh/@elevenlabs/client";
+
+      const startBtn = document.getElementById("startBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const sendBtn = document.getElementById("sendBtn");
+      const textInput = document.getElementById("textInput");
+      const statusText = document.getElementById("statusText");
+      const modeText = document.getElementById("modeText");
+      const transcript = document.getElementById("transcript");
+
+      let conversation = null;
+
+      function appendLine(kind, label, text) {
+        const wrapper = document.createElement("div");
+        wrapper.className = `line ${kind}`;
+
+        const speaker = document.createElement("div");
+        speaker.className = "speaker";
+        speaker.textContent = label;
+
+        const body = document.createElement("div");
+        body.textContent = text;
+
+        wrapper.appendChild(speaker);
+        wrapper.appendChild(body);
+        transcript.appendChild(wrapper);
+        transcript.scrollTop = transcript.scrollHeight;
+      }
+
+      function setStatus(status) {
+        statusText.textContent = status;
+        const connected = status === "connected" || status === "connecting";
+        startBtn.disabled = connected;
+        stopBtn.disabled = !connected;
+        sendBtn.disabled = !conversation || status !== "connected";
+      }
+
+      function extractText(message) {
+        if (typeof message === "string") return message;
+        if (message && typeof message.message === "string") return message.message;
+        if (message && typeof message.text === "string") return message.text;
+        return JSON.stringify(message);
+      }
+
+      async function getToken() {
+        const response = await fetch("/api/token");
+        if (!response.ok) {
+          throw new Error("Failed to fetch conversation token");
+        }
+        const data = await response.json();
+        return data.token;
+      }
+
+      async function startConversation() {
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+        const token = await getToken();
+
+        conversation = await Conversation.startSession({
+          conversationToken: token,
+          onConnect: () => {
+            setStatus("connected");
+            appendLine("event", "Session", "Connected to ElevenLabs.");
+          },
+          onDisconnect: () => {
+            appendLine("event", "Session", "Conversation ended.");
+            modeText.textContent = "idle";
+            conversation = null;
+            setStatus("disconnected");
+          },
+          onStatusChange: (status) => {
+            const nextStatus = typeof status === "string" ? status : status?.status || "disconnected";
+            setStatus(nextStatus);
+          },
+          onModeChange: (payload) => {
+            const nextMode = typeof payload === "string" ? payload : payload?.mode || "unknown";
+            modeText.textContent = nextMode;
+          },
+          onMessage: (message) => {
+            const label = message?.source || message?.role || "Message";
+            const kind = label === "user" ? "user" : label === "agent" ? "agent" : "event";
+            appendLine(kind, label, extractText(message));
+          },
+          onError: (error) => {
+            appendLine("event", "Error", error?.message || String(error));
+          }
+        });
+      }
+
+      async function stopConversation() {
+        if (!conversation) return;
+        await conversation.endSession();
+      }
+
+      function sendTypedMessage() {
+        if (!conversation) return;
+        const text = textInput.value.trim();
+        if (!text) return;
+        conversation.sendUserMessage(text);
+        textInput.value = "";
+      }
+
+      startBtn.addEventListener("click", () => {
+        setStatus("connecting");
+        startConversation().catch((error) => {
+          appendLine("event", "Error", error?.message || String(error));
+          setStatus("disconnected");
+        });
+      });
+
+      stopBtn.addEventListener("click", () => {
+        stopConversation().catch((error) => {
+          appendLine("event", "Error", error?.message || String(error));
+        });
+      });
+
+      sendBtn.addEventListener("click", sendTypedMessage);
+      textInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          sendTypedMessage();
+        }
+      });
+    </script>
+  </body>
+</html>

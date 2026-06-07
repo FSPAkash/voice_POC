@@ -121,71 +121,97 @@ def _strip_matching_quotes(value: str | None) -> str:
         return text[1:-1].strip()
     return text
 
-# Sarvam — replaces OpenAI realtime for both STT and TTS.
-SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
-SARVAM_BASE_URL = os.environ.get("SARVAM_BASE_URL", "https://api.sarvam.ai")
-SARVAM_TTS_MODEL = os.environ.get("SARVAM_TTS_MODEL", "bulbul:v3")
-SARVAM_STT_MODEL = os.environ.get("SARVAM_STT_MODEL", "saaras:v3")
-SARVAM_TTS_WS_URL = os.environ.get(
-    "SARVAM_TTS_WS_URL",
-    "wss://api.sarvam.ai/text-to-speech/ws",
+# Voice layer — ElevenLabs (TTS) + Sarvam Saarika (STT). Sarvam STT is purpose-
+# built for Indian languages (Marathi/Hindi/Bengali/Tamil/...) and outperforms
+# OpenAI transcribe on Indic, so STT stays on Sarvam. The "brain" (policy engine,
+# ground-truth grounding, chat-completion reply, supervisor, language coach) is
+# unrelated to the voice vendor and stays untouched.
+ELEVENLABS_API_KEY = _strip_matching_quotes(os.environ.get("ELEVENLABS_API_KEY", ""))
+ELEVENLABS_BASE_URL = _normalize_https_base_url(
+    _strip_matching_quotes(os.environ.get("ELEVENLABS_BASE_URL")),
+    "https://api.elevenlabs.io",
 )
-SARVAM_STT_WS_URL = os.environ.get(
-    "SARVAM_STT_WS_URL",
-    "wss://api.sarvam.ai/speech-to-text/ws",
+ELEVENLABS_TTS_MODEL = (os.environ.get("ELEVENLABS_TTS_MODEL", "eleven_v3") or "eleven_v3").strip()
+# language_code values the model accepts. eleven_v3 natively supports all our
+# Indic languages; older models only en/hi/ta. For codes NOT listed here we omit
+# language_code and let the input script drive synthesis instead of 400ing.
+ELEVENLABS_SUPPORTED_LANGUAGE_CODES = frozenset(
+    code.strip().lower()
+    for code in (
+        os.environ.get(
+            "ELEVENLABS_SUPPORTED_LANGUAGE_CODES",
+            "en,hi,ta,mr,bn,te,gu,kn,ml,pa,or",
+        )
+        or "en,hi,ta,mr,bn,te,gu,kn,ml,pa,or"
+    ).split(",")
+    if code.strip()
 )
-SARVAM_DEFAULT_FEMALE = os.environ.get("SARVAM_DEFAULT_FEMALE", "priya")
-SARVAM_DEFAULT_MALE = os.environ.get("SARVAM_DEFAULT_MALE", "ratan")
-DEFAULT_REALTIME_VOICE = SARVAM_DEFAULT_MALE  # alias kept for call sites that haven't been renamed
-# Aliases so legacy code paths that reference REALTIME_MODEL / REALTIME_TRANSCRIPTION_MODEL
-# (cost ledger labels, snapshot payload) keep compiling.
-REALTIME_MODEL = SARVAM_TTS_MODEL
-REALTIME_TRANSCRIPTION_MODEL = SARVAM_STT_MODEL
-SARVAM_TTS_SAMPLE_RATE = _env_int("SARVAM_TTS_SAMPLE_RATE", 24000, minimum=8000, maximum=48000)
-SARVAM_STT_SAMPLE_RATE = _env_int("SARVAM_STT_SAMPLE_RATE", 16000, minimum=8000, maximum=16000)
-# Bulbul prosody. Conservative, human-leaning defaults: a slightly slower pace
-# reads less rushed/robotic, and a small temperature bump adds intonation without
-# risking instability. All overridable from env for quick A/B testing on calls.
-SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.05, minimum=0.5, maximum=2.0)
-# English/aditya read slow at 1.10; 1.2 keeps a natural brisk-but-clear pace.
-SARVAM_TTS_PACE_ENGLISH = _env_float("SARVAM_TTS_PACE_ENGLISH", 1.2, minimum=0.5, maximum=2.0)
-SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.72, minimum=0.01, maximum=1.0)
-# English/aditya sounds flat; a higher temperature adds intonation/expressiveness.
-SARVAM_TTS_TEMPERATURE_ENGLISH = _env_float("SARVAM_TTS_TEMPERATURE_ENGLISH", 0.85, minimum=0.01, maximum=1.0)
+# Per-persona voice ids. Placeholder defaults so the app boots; drop real
+# ElevenLabs voice ids into backend/.env before a live call.
+ELEVENLABS_DEFAULT_FEMALE = (os.environ.get("ELEVENLABS_DEFAULT_FEMALE", "21m00Tcm4TlvDq8ikWAM") or "").strip()
+ELEVENLABS_DEFAULT_MALE = (os.environ.get("ELEVENLABS_DEFAULT_MALE", "TxGEqnHWrfWFTfGW9XjX") or "").strip()
+# Map the app's persona voice keys (VOICE_PERSONAS) -> ElevenLabs voice ids.
+# Each persona is individually env-overridable: ELEVENLABS_VOICE_<KEY>.
+ELEVENLABS_TTS_SAMPLE_RATE_BROWSER = _env_int("ELEVENLABS_TTS_SAMPLE_RATE_BROWSER", 24000, minimum=8000, maximum=48000)
+ELEVENLABS_TTS_SAMPLE_RATE_PHONE = _env_int("ELEVENLABS_TTS_SAMPLE_RATE_PHONE", 8000, minimum=8000, maximum=24000)
+# ElevenLabs voice_settings overrides (Flash v2.5). Stability/similarity/style in
+# 0..1, speed 0.7..1.2. Conservative human-leaning defaults.
+ELEVENLABS_VOICE_STABILITY = _env_float("ELEVENLABS_VOICE_STABILITY", 0.5, minimum=0.0, maximum=1.0)
+ELEVENLABS_VOICE_SIMILARITY = _env_float("ELEVENLABS_VOICE_SIMILARITY", 0.75, minimum=0.0, maximum=1.0)
+ELEVENLABS_VOICE_STYLE = _env_float("ELEVENLABS_VOICE_STYLE", 0.0, minimum=0.0, maximum=1.0)
+ELEVENLABS_VOICE_SPEED = _env_float("ELEVENLABS_VOICE_SPEED", 1.15, minimum=0.7, maximum=1.2)
+ELEVENLABS_VOICE_SPEAKER_BOOST = _env_flag("ELEVENLABS_VOICE_SPEAKER_BOOST", True)
+# Text normalization: "on" spells out numbers/dates in the target language (Hindi
+# "3" -> "teen"); "auto" lets ElevenLabs decide; "off" disables. We pre-convert
+# IDs/phones/amounts to English ourselves, so "on" handles the rest in-language.
+ELEVENLABS_TEXT_NORMALIZATION = (os.environ.get("ELEVENLABS_TEXT_NORMALIZATION", "on") or "on").strip().lower()
+if ELEVENLABS_TEXT_NORMALIZATION not in {"on", "auto", "off"}:
+    ELEVENLABS_TEXT_NORMALIZATION = "on"
+# Pronunciation dictionary (alias rules) so brand/payment terms + names are said
+# consistently: DHL -> "D H L", NEFT/RTGS/UPI spelled, MyBill -> "My Bill", etc.
+# Created via /v1/pronunciation-dictionaries/add-from-rules. Set both id+version.
+ELEVENLABS_PRON_DICT_ID = (os.environ.get("ELEVENLABS_PRON_DICT_ID", "F6QAB5Afyd7NaPO4vXlb") or "").strip()
+ELEVENLABS_PRON_DICT_VERSION_ID = (os.environ.get("ELEVENLABS_PRON_DICT_VERSION_ID", "sfnJqQWMZwZGEWGBbGBd") or "").strip()
+# eleven_v3 audio tags steer delivery tone. For a collections agent we default to
+# a calm, professional collector tone, and adapt per-turn from the reply's intent
+# (empathetic for hardship, firm for delay/refusal). Set ELEVENLABS_AUDIO_TAGS=0
+# to disable entirely (some voices over-act on tags).
+ELEVENLABS_AUDIO_TAGS = _env_flag("ELEVENLABS_AUDIO_TAGS", True)
+ELEVENLABS_TONE_DEFAULT = (os.environ.get("ELEVENLABS_TONE_DEFAULT", "professional") or "professional").strip()
+ELEVENLABS_TONE_EMPATHETIC = (os.environ.get("ELEVENLABS_TONE_EMPATHETIC", "empathetic") or "empathetic").strip()
+ELEVENLABS_TONE_FIRM = (os.environ.get("ELEVENLABS_TONE_FIRM", "firm") or "firm").strip()
+# eleven_v3 only — older models would read the tag literally.
+_AUDIO_TAG_MODELS = {"eleven_v3"}
+# Models that REJECT previous_text/next_text (400 unsupported_model). eleven_v3
+# does not support continuity context yet.
+_NO_CONTINUITY_MODELS = {"eleven_v3"}
 # Humanize spoken text (spell dates, group long numbers, light clause pauses) so
-# Bulbul does not read IDs/dates mechanically. Off -> previous behaviour.
-SARVAM_TTS_HUMANIZE = _env_flag("SARVAM_TTS_HUMANIZE", True)
-SARVAM_TTS_MIN_BUFFER_SIZE = _env_int("SARVAM_TTS_MIN_BUFFER_SIZE", 30, minimum=30, maximum=200)
-SARVAM_TTS_MAX_CHUNK_LENGTH = _env_int("SARVAM_TTS_MAX_CHUNK_LENGTH", 200, minimum=30, maximum=400)
-SARVAM_TTS_OUTPUT_CODEC = (os.environ.get("SARVAM_TTS_OUTPUT_CODEC", "linear16") or "linear16").strip().lower()
-SARVAM_TTS_OUTPUT_BITRATE = (os.environ.get("SARVAM_TTS_OUTPUT_BITRATE", "128k") or "128k").strip()
-SARVAM_TTS_STREAM_FORMAT = "pcm_s16le" if SARVAM_TTS_OUTPUT_CODEC in {"linear16", "pcm"} else SARVAM_TTS_OUTPUT_CODEC
-SARVAM_TTS_SEND_COMPLETION_EVENT = _env_flag("SARVAM_TTS_SEND_COMPLETION_EVENT", True)
-SARVAM_TTS_DICT_ID = (os.environ.get("SARVAM_TTS_DICT_ID", "") or "").strip()
+# the voice does not read IDs/dates mechanically. Vendor-neutral text prep.
+TTS_HUMANIZE = _env_flag("TTS_HUMANIZE", True)
+
+# Sarvam Saarika (STT) — purpose-built for Indian languages. Streaming WS proxy.
+SARVAM_API_KEY = _strip_matching_quotes(os.environ.get("SARVAM_API_KEY", ""))
+SARVAM_BASE_URL = _normalize_https_base_url(
+    _strip_matching_quotes(os.environ.get("SARVAM_BASE_URL")),
+    "https://api.sarvam.ai",
+)
+SARVAM_STT_MODEL = (os.environ.get("SARVAM_STT_MODEL", "saaras:v3") or "saaras:v3").strip()
+SARVAM_STT_WS_URL = (
+    os.environ.get("SARVAM_STT_WS_URL", "wss://api.sarvam.ai/speech-to-text/ws")
+    or "wss://api.sarvam.ai/speech-to-text/ws"
+).strip()
+SARVAM_STT_SAMPLE_RATE = _env_int("SARVAM_STT_SAMPLE_RATE", 16000, minimum=8000, maximum=16000)
 SARVAM_STT_MODE = (os.environ.get("SARVAM_STT_MODE", "codemix") or "codemix").strip().lower()
 if SARVAM_STT_MODE not in {"transcribe", "translate", "verbatim", "translit", "codemix"}:
     SARVAM_STT_MODE = "codemix"
 
-# When the TTS language is a native (non-English) script, Latin-script words in
-# the agent reply make Bulbul mispronounce. We transliterate those Latin runs
-# into the target script via Sarvam's transliterate API before synthesis. This
-# is a hard backstop independent of whether the LLM obeyed the native-script
-# instruction. Disable with SARVAM_TTS_TRANSLITERATE=0.
-SARVAM_TTS_TRANSLITERATE = _env_flag("SARVAM_TTS_TRANSLITERATE", True)
-# Brand / business tokens we deliberately keep in Latin even in native modes
-# (Bulbul says these acceptably in-context; transliterating them mangles them).
-# Matched case-insensitively as whole words.
-SARVAM_TTS_LATIN_ALLOWLIST = frozenset(
-    tok.strip().casefold()
-    for tok in (
-        os.environ.get(
-            "SARVAM_TTS_LATIN_ALLOWLIST",
-            "DHL,MyBill,DHL Express,INR,Express,India,OK,email,id,no",
-        )
-        or ""
-    ).split(",")
-    if tok.strip()
-)
+DEFAULT_REALTIME_VOICE = "ratan"  # persona key; resolved to a voice id via elevenlabs_voice_id()
+# Aliases so legacy code paths that reference REALTIME_MODEL / REALTIME_TRANSCRIPTION_MODEL
+# (cost ledger labels, snapshot payload) keep compiling.
+REALTIME_MODEL = ELEVENLABS_TTS_MODEL
+REALTIME_TRANSCRIPTION_MODEL = SARVAM_STT_MODEL
+# Back-compat model-id alias.
+SARVAM_TTS_MODEL = ELEVENLABS_TTS_MODEL
 
 EXOTEL_ACCOUNT_SID = _strip_matching_quotes(os.environ.get("EXOTEL_ACCOUNT_SID", ""))
 EXOTEL_API_KEY = _strip_matching_quotes(os.environ.get("EXOTEL_API_KEY", ""))
@@ -279,8 +305,9 @@ VOICE_PERSONAS: dict[str, dict[str, str]] = {
 }
 DEFAULT_PERSONA = {"name": "Yogesh", "gender": "male", "pronouns": "he/him"}
 
-# Public catalogue for the frontend voice picker.
-SARVAM_VOICES = [
+# Public catalogue for the frontend voice picker. Persona ids map to ElevenLabs
+# voice ids via ELEVENLABS_VOICE_IDS below.
+TTS_VOICES = [
     {"id": "priya", "label": "Priya (female, recommended)", "gender": "female"},
     {"id": "ishita", "label": "Ishita (female)", "gender": "female"},
     {"id": "ritu", "label": "Ritu (female)", "gender": "female"},
@@ -293,72 +320,53 @@ SARVAM_VOICES = [
     {"id": "mani", "label": "Mani (male, broad coverage)", "gender": "male"},
 ]
 
-SARVAM_RECOMMENDED_MALE_VOICE_BY_LANGUAGE = {
-    "en-IN": "aditya",
-    "hi-IN": "shubh",
-    "te-IN": "shubh",
-    "kn-IN": "shubh",
-    "bn-IN": "rehan",
-    "ta-IN": "ratan",
-    "od-IN": "shubh",
-    "ml-IN": "shubh",
-    "mr-IN": "ratan",
-    "pa-IN": "mani",
-    "gu-IN": "ratan",
-}
 
-SARVAM_RECOMMENDED_FEMALE_VOICE_BY_LANGUAGE = {
-    "en-IN": "ishita",
-    "hi-IN": "priya",
-    "te-IN": "priya",
-    "kn-IN": "ishita",
-    "bn-IN": "roopa",
-    "ta-IN": "ishita",
-    "od-IN": "ritu",
-    "ml-IN": "pooja",
-    "mr-IN": "priya",
-    "pa-IN": "roopa",
-    "gu-IN": "priya",
-}
+def _resolve_elevenlabs_voice_ids() -> dict[str, str]:
+    """Persona key -> ElevenLabs voice id. Default by gender to the
+    ELEVENLABS_DEFAULT_FEMALE/MALE ids; allow a per-persona override via
+    ELEVENLABS_VOICE_<KEY> (e.g. ELEVENLABS_VOICE_PRIYA=...)."""
+    ids: dict[str, str] = {}
+    for key, persona in VOICE_PERSONAS.items():
+        default_id = (
+            ELEVENLABS_DEFAULT_FEMALE if persona.get("gender") == "female" else ELEVENLABS_DEFAULT_MALE
+        )
+        override = (os.environ.get(f"ELEVENLABS_VOICE_{key.upper()}", "") or "").strip()
+        ids[key] = override or default_id
+    return ids
+
+
+ELEVENLABS_VOICE_IDS = _resolve_elevenlabs_voice_ids()
 
 
 def persona_for_voice(voice: str | None) -> dict[str, str]:
     return VOICE_PERSONAS.get((voice or DEFAULT_REALTIME_VOICE).lower(), DEFAULT_PERSONA)
 
 
-def localized_sarvam_voice(voice: str | None, language_code: str | None) -> str:
+def elevenlabs_voice_id(voice: str | None) -> str:
+    """Resolve a persona key to its ElevenLabs voice id. ElevenLabs has one model
+    and a single voice per persona, so there is no per-language voice swap."""
     requested = (voice or DEFAULT_REALTIME_VOICE).strip().lower()
     if requested not in VOICE_PERSONAS:
         requested = DEFAULT_REALTIME_VOICE
-    gender = persona_for_voice(requested)["gender"]
-    mapping = (
-        SARVAM_RECOMMENDED_FEMALE_VOICE_BY_LANGUAGE
-        if gender == "female"
-        else SARVAM_RECOMMENDED_MALE_VOICE_BY_LANGUAGE
-    )
-    return mapping.get((language_code or "").strip(), requested)
+    gender = persona_for_voice(requested).get("gender", "male")
+    fallback = ELEVENLABS_DEFAULT_FEMALE if gender == "female" else ELEVENLABS_DEFAULT_MALE
+    return ELEVENLABS_VOICE_IDS.get(requested) or fallback
 
 
-def sarvam_tts_pace(language_code: str | None, voice: str | None) -> float:
-    normalized_language = (language_code or "").strip().lower()
-    localized_voice = localized_sarvam_voice(voice, language_code)
-    if normalized_language == "en-in" or localized_voice == "aditya":
-        return SARVAM_TTS_PACE_ENGLISH
-    return SARVAM_TTS_PACE
+def elevenlabs_voice_settings() -> dict[str, Any]:
+    return {
+        "stability": ELEVENLABS_VOICE_STABILITY,
+        "similarity_boost": ELEVENLABS_VOICE_SIMILARITY,
+        "style": ELEVENLABS_VOICE_STYLE,
+        "speed": ELEVENLABS_VOICE_SPEED,
+        "use_speaker_boost": ELEVENLABS_VOICE_SPEAKER_BOOST,
+    }
 
 
-def sarvam_tts_temperature(language_code: str | None, voice: str | None) -> float:
-    """English (aditya) reads flat; a higher temperature adds intonation so it
-    sounds less robotic. Native voices keep the steadier default for stability."""
-    normalized_language = (language_code or "").strip().lower()
-    localized_voice = localized_sarvam_voice(voice, language_code)
-    if normalized_language == "en-in" or localized_voice == "aditya":
-        return SARVAM_TTS_TEMPERATURE_ENGLISH
-    return SARVAM_TTS_TEMPERATURE
-
-
-# App language_id -> Sarvam BCP-47 code.
-SARVAM_LANGUAGE_CODES: dict[str, str] = {
+# App language_id -> BCP-47 code. Used by the language coach / brain to reason
+# about the call language and as an optional ElevenLabs language_code hint. Not
+# tied to any single voice vendor.
+LANGUAGE_CODES: dict[str, str] = {
     "english": "en-IN",
     "hinglish": "hi-IN",
     "hindi": "hi-IN",
@@ -374,40 +382,42 @@ SARVAM_LANGUAGE_CODES: dict[str, str] = {
 }
 
 
+def language_code_for_id(language_id: str | None) -> str:
+    return LANGUAGE_CODES.get((language_id or "hinglish").lower(), "hi-IN")
+
+
+# ElevenLabs wants an ISO 639-1 code; derive it from the BCP-47 head.
+def elevenlabs_language_code(language_id: str | None) -> str:
+    return language_code_for_id(language_id).split("-")[0]
+
+
+LANGUAGE_IDS_BY_CODE = {
+    code: language_id
+    for language_id, code in LANGUAGE_CODES.items()
+    if language_id not in {"hinglish", "hindi"} or code not in {"hi-IN"}
+}
+LANGUAGE_IDS_BY_CODE.setdefault("bn-IN", "bengali")
+LANGUAGE_IDS_BY_CODE.setdefault("mr-IN", "marathi")
+LANGUAGE_IDS_BY_CODE.setdefault("ta-IN", "tamil")
+
+
+# Back-compat aliases for call sites not yet renamed. The brain's language-switch
+# logic and a few phone paths reference the old Sarvam-named helpers.
 def sarvam_language_code(language_id: str | None) -> str:
-    return SARVAM_LANGUAGE_CODES.get((language_id or "hinglish").lower(), "hi-IN")
+    return language_code_for_id(language_id)
 
 
 def sarvam_stt_language_code(language_id: str | None) -> str:
+    """Sarvam STT language hint. hinglish -> "unknown" so Saarika auto-detects the
+    English/Indic mix per utterance instead of forcing one language."""
     normalized = (language_id or DEFAULT_LANGUAGE_ID).strip().lower()
     if normalized == "hinglish":
         return "unknown"
-    return sarvam_language_code(normalized)
+    return language_code_for_id(normalized)
 
 
-def sarvam_tts_options(language_code: str, voice: str) -> dict[str, Any]:
-    localized_voice = localized_sarvam_voice(voice, language_code)
-    options: dict[str, Any] = {
-        "target_language_code": language_code,
-        "speaker": localized_voice,
-        "model": SARVAM_TTS_MODEL,
-        "speech_sample_rate": SARVAM_TTS_SAMPLE_RATE,
-        "pace": sarvam_tts_pace(language_code, voice),
-        "temperature": sarvam_tts_temperature(language_code, voice),
-    }
-    if SARVAM_TTS_DICT_ID:
-        options["dict_id"] = SARVAM_TTS_DICT_ID
-    return options
-
-
-SARVAM_LANGUAGE_IDS_BY_CODE = {
-    code: language_id
-    for language_id, code in SARVAM_LANGUAGE_CODES.items()
-    if language_id not in {"hinglish", "hindi"} or code not in {"hi-IN"}
-}
-SARVAM_LANGUAGE_IDS_BY_CODE.setdefault("bn-IN", "bengali")
-SARVAM_LANGUAGE_IDS_BY_CODE.setdefault("mr-IN", "marathi")
-SARVAM_LANGUAGE_IDS_BY_CODE.setdefault("ta-IN", "tamil")
+SARVAM_LANGUAGE_CODES = LANGUAGE_CODES
+SARVAM_LANGUAGE_IDS_BY_CODE = LANGUAGE_IDS_BY_CODE
 
 
 def default_language_advice(language_id: str | None = None) -> dict[str, Any]:
@@ -647,21 +657,16 @@ HUMAN_AGENT = {
     "team": "DHL Express India Collections",
 }
 
-# Per-million-unit USD prices. OpenAI text models are still token-based; Sarvam
-# bills TTS per character and STT per second, so we use synthetic "per million"
-# rates so the existing ledger math stays uniform.
-# Sarvam publishes INR rates, so we convert them using a configurable INR/USD
-# reference rate. The INR figures are the official provider prices; the USD
-# conversions are internal normalized estimates rather than settlement values.
-PRICE_TABLE_VERSION = "openai+sarvam-pricing-2026-06-02"
+# Per-million-unit USD prices. OpenAI text models are token-based; ElevenLabs
+# bills TTS per character and Sarvam STT per second of audio, so we express those
+# as synthetic "per million" rates so the existing ledger math stays uniform.
+PRICE_TABLE_VERSION = "openai+elevenlabs+sarvam-stt-pricing-2026-06-07"
+# ElevenLabs list price ~ $0.50 / 1000 chars on paid tiers -> $500/1M chars
+# headline, but credit-based plans land far lower; keep env-overridable.
+ELEVENLABS_USD_PER_MILLION_CHARS = _env_float("ELEVENLABS_USD_PER_MILLION_CHARS", 50.0, minimum=0.0)
+# Sarvam STT bills in INR per hour; convert to USD using a configurable rate.
 SARVAM_INR_PER_USD = _env_float("SARVAM_INR_PER_USD", 96.13, minimum=1.0)
-SARVAM_BULBUL_V3_INR_PER_10K_CHARS = _env_float("SARVAM_BULBUL_V3_INR_PER_10K_CHARS", 30.0, minimum=0.0)
-SARVAM_BULBUL_V2_INR_PER_10K_CHARS = _env_float("SARVAM_BULBUL_V2_INR_PER_10K_CHARS", 15.0, minimum=0.0)
 SARVAM_STT_INR_PER_HOUR = _env_float("SARVAM_STT_INR_PER_HOUR", 30.0, minimum=0.0)
-
-
-def _sarvam_chars_usd_per_million(inr_per_10k_chars: float) -> float:
-    return round((float(inr_per_10k_chars) * 100.0) / SARVAM_INR_PER_USD, 6)
 
 
 def _sarvam_seconds_usd_per_million(inr_per_hour: float) -> float:
@@ -669,25 +674,22 @@ def _sarvam_seconds_usd_per_million(inr_per_hour: float) -> float:
 
 
 DEFAULT_PRICE_TABLE = {
-    # Sarvam Bulbul (TTS). We meter output characters in `text_output_tokens`
+    # ElevenLabs (TTS). We meter output characters in `text_output_tokens`
     # so the existing ledger keys keep working.
-    "bulbul:v3": {
-        "text_output_per_million": _sarvam_chars_usd_per_million(SARVAM_BULBUL_V3_INR_PER_10K_CHARS),
+    "eleven_v3": {
+        "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS,
     },
-    "bulbul:v2": {
-        "text_output_per_million": _sarvam_chars_usd_per_million(SARVAM_BULBUL_V2_INR_PER_10K_CHARS),
+    "eleven_flash_v2_5": {
+        "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS,
     },
-    "bulbul:v1": {
-        "text_output_per_million": _sarvam_chars_usd_per_million(SARVAM_BULBUL_V2_INR_PER_10K_CHARS),
+    "eleven_multilingual_v2": {
+        "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS,
     },
     # Sarvam Saarika (STT). We meter seconds of mic audio in `audio_input_tokens`.
     "saaras:v3": {
         "audio_input_per_million": _sarvam_seconds_usd_per_million(SARVAM_STT_INR_PER_HOUR),
     },
     "saarika:v2.5": {
-        "audio_input_per_million": _sarvam_seconds_usd_per_million(SARVAM_STT_INR_PER_HOUR),
-    },
-    "saarika:v2": {
         "audio_input_per_million": _sarvam_seconds_usd_per_million(SARVAM_STT_INR_PER_HOUR),
     },
     # Legacy OpenAI realtime / transcription entries retained for historical
@@ -1536,13 +1538,17 @@ MARATHI_SCRIPT_MARKERS = (
     "\u0939\u094b\u0924\u093e",    # hota (was)
     "\u0939\u094b\u0924\u0940",    # hoti
     "\u0939\u094b\u0924\u0947",    # hote
+    "\u0939\u094b\u0924\u094d\u092f\u093e",  # hotya (were, fem pl) -- distinctly Marathi
+    "\u0939\u094b\u0923\u093e\u0930",  # honar (will happen/be)
     "\u0939\u094b\u0908\u0932",    # hoil (will be)
+    "\u091a\u093e\u0932\u0947\u0932",  # chalel (will do/work)
     # pronouns (Marathi-specific forms)
     "\u0924\u0941\u092e\u094d\u0939\u0940",  # tumhi (you, formal)
     "\u0906\u092a\u0923",          # aapan (we/you incl.)
     "\u0906\u092e\u094d\u0939\u0940",  # aamhi (we)
     "\u092e\u0940",                # mi (I; Hindi \u092e\u0948\u0902)
-    "\u0924\u094b",                # to (he)  -- note: short, kept for ratio with others
+    # NOTE: \u0924\u094b removed -- it means "he/that" in Marathi but "then/so" in Hindi
+    # and is very common in Hindi, causing false Marathi hits on Hindi turns.
     "\u0924\u094d\u092f\u093e\u0902\u0928\u0940",  # tyanni
     "\u092e\u0932\u093e",          # mala (to me)
     "\u0924\u0941\u092e\u094d\u0939\u093e\u0932\u093e",  # tumhala (to you)
@@ -1574,6 +1580,13 @@ MARATHI_SCRIPT_MARKERS = (
     "\u0906\u0924\u093e",          # aata (now; Hindi \u0905\u092d\u0940 differs)
     "\u092a\u0923",                # pan (but)
     "\u0906\u0923\u093f",          # aani (and; Hindi \u0914\u0930)
+    "\u092a\u0941\u0922\u091a\u094d\u092f\u093e",  # pudhchya (next) -- Marathi oblique
+    "\u0906\u0920\u0935\u0921\u094d\u092f\u093e\u0924",  # aathvadyat (in the week)
+    "\u092f\u093e\u091a\u094d\u092f\u093e\u0935\u0930\u0924\u0940",  # yachyavarti (on this)
+    "\u0924\u0930",                # tar (then/if; Marathi connective)
+    "\u092e\u0927\u094d\u092f\u0947",          # madhye (in; Hindi \u092e\u0947\u0902)
+    "\u0915\u093f\u0902\u0935\u093e",        # kinva (or)
+    "\u0926\u093f\u0935\u0938\u093e\u0924",  # divasat (in days)
 )
 
 
@@ -1612,13 +1625,14 @@ HINDI_SCRIPT_MARKERS = (
     "कब",            # kab (when; Marathi केव्हा)
     "कितना",         # kitna (how much; Marathi किती)
     "कहाँ",          # kahan (where; Marathi कुठे)
-    "ठीक",           # theek (ok) -- shared but very common in Hindi
-    "को",            # ko (postposition; Marathi requires whole-word guard)
-    "का",            # ka
-    "की",            # ki
-    "के",            # ke
-    "में",           # mein (in; Marathi मध्ये)
-    "से",            # se (from)
+    "हूंगा",         # hoonga (will be, masc)
+    "दूंगा",         # doonga (will give)
+    "रुका",          # ruka (held/stopped)
+    "क्यूं",         # kyun (alt)
+    # NOTE: का / की / के / को / में / से / ठीक were removed. They are NOT
+    # Hindi-exclusive — Marathi uses का (question particle), में/मध्ये, से, etc.
+    # Keeping them mislabelled Marathi turns as Hindi (the "पुढच्या आठवड्यात ... का?"
+    # bug) and forced wrong Hindi replies.
 )
 _HINDI_WHOLE_WORD_ONLY = frozenset({m for m in HINDI_SCRIPT_MARKERS if len(m) <= 3})
 
@@ -1878,148 +1892,13 @@ def _coerce_confidence(value: Any) -> float | None:
     return {"high": 0.95, "medium": 0.6, "low": 0.3}.get(label)
 
 
-# Language codes that render in a native (non-Latin) script. Latin runs fed to
-# Bulbul under these codes mispronounce, so we transliterate them. en-IN is the
-# only Latin-target code. hi-IN is shared by hindi (native) and hinglish
-# (intentional code-mix); the caller disambiguates via language_id.
+# Language codes that render in a native (non-Latin) script. en-IN is the only
+# Latin-target code. hi-IN is shared by hindi (native) and hinglish (code-mix);
+# the caller disambiguates via language_id. ElevenLabs Flash multilingual handles
+# code-switch natively, so we no longer transliterate Latin runs.
 _NATIVE_TTS_LANGUAGE_CODES = frozenset(
-    code for code in SARVAM_LANGUAGE_CODES.values() if code != "en-IN"
+    code for code in LANGUAGE_CODES.values() if code != "en-IN"
 )
-# Sarvam transliterate output script per target language code.
-_SARVAM_TRANSLITERATE_TARGETS = {
-    code: code for code in _NATIVE_TTS_LANGUAGE_CODES
-}
-# Run of Latin letters (with internal apostrophes/hyphens) — the unit we
-# transliterate. Digits, ₹, punctuation and native-script text are left alone.
-_LATIN_RUN_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
-
-
-# Process-lifetime cache of word -> native script, keyed by (word_cf, target).
-# Persists across turns/calls so common words ("payment", "invoice", "theek")
-# are transliterated at most once ever.
-_TRANSLITERATE_CACHE: dict[tuple[str, str], str] = {}
-_TRANSLITERATE_CACHE_LOCK = threading.Lock()
-# Newline-safe separator we send to Sarvam to batch many words in one request.
-_TRANSLITERATE_BATCH_SEP = "\n"
-
-
-def _sarvam_transliterate_batch(words: list[str], target_language_code: str) -> dict[str, str]:
-    """Transliterate many Latin words in a SINGLE request. Returns {word: native}.
-    Never raises; missing/failed words simply absent from the result so the caller
-    falls back to the original. One network round-trip regardless of word count,
-    so it stays out of the per-turn latency budget."""
-    if not words or not SARVAM_API_KEY:
-        return {}
-    payload_text = _TRANSLITERATE_BATCH_SEP.join(words)
-    try:
-        resp = requests.post(
-            f"{SARVAM_BASE_URL}/transliterate",
-            headers={
-                "api-subscription-key": SARVAM_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "input": payload_text,
-                "source_language_code": "en-IN",
-                "target_language_code": target_language_code,
-                "spoken_form": True,
-            },
-            timeout=6,
-        )
-        if not resp.ok:
-            return {}
-        out = str((resp.json() or {}).get("transliterated_text") or "")
-    except Exception:
-        return {}
-    parts = out.split(_TRANSLITERATE_BATCH_SEP)
-    # Only trust a clean 1:1 line alignment; otherwise skip rather than misalign.
-    if len(parts) != len(words):
-        return {}
-    mapping: dict[str, str] = {}
-    for src, dst in zip(words, parts):
-        dst = dst.strip()
-        if dst:
-            mapping[src] = dst
-    return mapping
-
-
-def _should_transliterate_word(word: str) -> bool:
-    if word.casefold() in SARVAM_TTS_LATIN_ALLOWLIST:
-        return False
-    # Single letters and all-caps acronyms read better as letters in Bulbul.
-    if len(word) == 1:
-        return False
-    if word.isupper() and len(word) <= 4:
-        return False
-    return True
-
-
-def transliterate_latin_for_tts(text: str, language_code: str | None) -> str:
-    """Replace Latin-script words with their native-script transliteration so a
-    non-English Bulbul voice pronounces them correctly. Allowlisted brand tokens
-    (DHL, MyBill, ...), digits and punctuation are left untouched. Uses one
-    batched network call for all uncached words to keep TTS latency low."""
-    code = (language_code or "").strip()
-    if code not in _NATIVE_TTS_LANGUAGE_CODES:
-        return text
-    target = _SARVAM_TRANSLITERATE_TARGETS.get(code)
-    if not target:
-        return text
-
-    words = [m.group(0) for m in _LATIN_RUN_RE.finditer(text)]
-    if not words:
-        return text
-
-    # Resolve from cache first; collect the misses for one batched call.
-    resolved: dict[str, str] = {}
-    misses: list[str] = []
-    with _TRANSLITERATE_CACHE_LOCK:
-        for word in words:
-            if not _should_transliterate_word(word):
-                continue
-            cached = _TRANSLITERATE_CACHE.get((word.casefold(), target))
-            if cached is not None:
-                resolved[word] = cached
-            elif word not in resolved and word not in misses:
-                misses.append(word)
-
-    if misses:
-        fetched = _sarvam_transliterate_batch(misses, target)
-        with _TRANSLITERATE_CACHE_LOCK:
-            for word in misses:
-                native = fetched.get(word, word)  # fall back to original on miss
-                _TRANSLITERATE_CACHE[(word.casefold(), target)] = native
-                resolved[word] = native
-
-    def _replace(match: re.Match[str]) -> str:
-        word = match.group(0)
-        return resolved.get(word, word)
-
-    return _LATIN_RUN_RE.sub(_replace, text)
-
-
-_MONTH_NAMES = (
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-)
-_ORDINALS = {
-    1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth",
-    7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth", 11: "eleventh",
-    12: "twelfth", 13: "thirteenth", 14: "fourteenth", 15: "fifteenth",
-    16: "sixteenth", 17: "seventeenth", 18: "eighteenth", 19: "nineteenth",
-    20: "twentieth", 21: "twenty-first", 22: "twenty-second", 23: "twenty-third",
-    24: "twenty-fourth", 25: "twenty-fifth", 26: "twenty-sixth",
-    27: "twenty-seventh", 28: "twenty-eighth", 29: "twenty-ninth",
-    30: "thirtieth", 31: "thirty-first",
-}
-
-
-def _spoken_iso_date(match: re.Match[str]) -> str:
-    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-    if not (1 <= month <= 12 and 1 <= day <= 31):
-        return match.group(0)
-    day_word = _ORDINALS.get(day, str(day))
-    return f"{day_word} {_MONTH_NAMES[month - 1]} {year}"
 
 
 def _spoken_iso_date_numeric(match: re.Match[str]) -> str:
@@ -2032,39 +1911,194 @@ def _spoken_iso_date_numeric(match: re.Match[str]) -> str:
     return f"{day} {month} {year}"
 
 
-def humanize_spoken_text(text: str, language_code: str | None) -> str:
-    """Make business strings sound spoken rather than printed: reformat ISO dates
-    and add a light pause around long alphanumeric IDs so they aren't rushed.
+_ONES = (
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen",
+)
+_TENS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
 
-    Only PURE English (en-IN) gets spelled month/ordinal words. For Hindi /
-    Hinglish / native scripts those English words would either be read as foreign
-    or (worse) transliterated phonetically into Devanagari and mispronounced, so
-    those keep digit form, which Bulbul speaks correctly in-language."""
-    code = (language_code or "").strip().lower()
 
-    if code == "en-in":
-        text = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b", _spoken_iso_date, text)
-    else:
-        text = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b", _spoken_iso_date_numeric, text)
+def _two_digit_words(n: int) -> str:
+    if n < 20:
+        return _ONES[n]
+    tens, ones = divmod(n, 10)
+    return _TENS[tens] + ("-" + _ONES[ones] if ones else "")
 
-    # Long alphanumeric IDs (e.g. DHL123456): keep the split letters+digits but
-    # add a slight comma pause so the voice doesn't machine-gun the digits.
-    text = re.sub(r"\b([A-Za-z]{2,})\s+(\d{4,})\b", r"\1, \2", text)
+
+def _indian_number_words(n: int) -> str:
+    """Spell an integer in the Indian numbering system (lakh/crore) as words, so
+    the voice says 'fifty-seven thousand nine hundred twenty' instead of mangling
+    a digit string. Caps at crore for our invoice-sized amounts."""
+    if n == 0:
+        return "zero"
+    parts: list[str] = []
+    crore, n = divmod(n, 10_000_000)
+    lakh, n = divmod(n, 100_000)
+    thousand, n = divmod(n, 1000)
+    hundred, rest = divmod(n, 100)
+    if crore:
+        parts.append(_indian_number_words(crore) + " crore")
+    if lakh:
+        parts.append(_two_digit_words(lakh) + " lakh")
+    if thousand:
+        parts.append(_two_digit_words(thousand) + " thousand")
+    if hundred:
+        parts.append(_ONES[hundred] + " hundred")
+    if rest:
+        parts.append(_two_digit_words(rest))
+    # Join groups with commas, not spaces: the comma is a brief spoken pause that
+    # keeps the voice from blurring compound words (e.g. "fifty-seven" misheard as
+    # "seventy-seven") and machine-gunning the groups together.
+    return ", ".join(parts)
+
+
+# Map non-ASCII (Devanagari/Bengali/Tamil/etc.) digits to ASCII so number
+# detection + word conversion works regardless of the surrounding script.
+_DIGIT_TRANSLATION = {}
+for _base in (0x0966, 0x09E6, 0x0BE6, 0x0C66, 0x0CE6, 0x0A66, 0x0AE6, 0x0B66, 0x0D66):  # Deva, Beng, Tamil, Telugu, Kannada, Gurmukhi, Gujarati, Oriya, Malayalam
+    for _d in range(10):
+        _DIGIT_TRANSLATION[_base + _d] = ord("0") + _d
+
+
+def _to_ascii_digits(text: str) -> str:
+    return text.translate(_DIGIT_TRANSLATION)
+
+
+# Currency: ₹57,920 | Rs. 57920 | INR 57,920 | 57920 INR | 57,920 rupees/rupaye
+_CURRENCY_RE = re.compile(
+    r"(?:(?:₹|Rs\.?|INR|रुपये|रुपए|रुपया|रुपयांचे|रुपयांत|রুপি|ரூபாய்)\s*(?P<amount>\d[\d,]*)"
+    r"|(?P<amount2>\d[\d,]*)\s*(?:INR|rupees|rupaye|rs|₹|रुपये|रुपए|रुपया|রুপি|ரூபாய்))",
+    re.IGNORECASE,
+)
+# ISO date 2026-01-31 (reformatted to "day month year" digits for normalization).
+_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+
+
+def _currency_sub(match: re.Match[str]) -> str:
+    amt = match.group("amount") or match.group("amount2") or ""
+    digits = re.sub(r"[,\s]", "", amt)
+    if not digits.isdigit():
+        return match.group(0)
+    value = int(digits)
+    if value > 99_99_99_999:
+        return match.group(0)
+    # Keep the DIGITS (Indian-grouped for clear phrasing) + "Rupees" as the unit,
+    # and let ElevenLabs text normalization speak the number in the sentence's
+    # language. Our old English word-spelling ("fifty-seven thousand...") was
+    # occasionally misheard by eleven_v3 as "seventy-seven" mid-sentence; digits
+    # via normalization are read consistently.
+    grouped = _indian_group_digits(value)
+    return f"{grouped} Rupees"
+
+
+def _indian_group_digits(value: int) -> str:
+    """Format an integer with Indian thousands separators: 5792000 -> 57,92,000,
+    57920 -> 57,920. The commas give a clearer spoken grouping."""
+    s = str(value)
+    if len(s) <= 3:
+        return s
+    head, tail = s[:-3], s[-3:]
+    # group head in pairs from the right (Indian system)
+    parts = []
+    while len(head) > 2:
+        parts.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        parts.insert(0, head)
+    return ",".join(parts) + "," + tail
+
+
+_DIGIT_NAMES =("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+
+
+def _spell_digits(digits: str) -> str:
+    """Speak a digit run digit-by-digit: '123456' -> 'one two three four five six'.
+    Used for invoice IDs / account numbers where grouped number words are wrong."""
+    return " ".join(_DIGIT_NAMES[int(d)] for d in digits if d.isdigit())
+
+
+# Invoice ID / reference: 2+ letters DIRECTLY joined to 3+ digits (e.g.
+# "DHL123456"). Must be glued (no space) so we don't swallow "date 2026" or
+# "invoices 3". Not followed by date punctuation. Spoken as letters + digits.
+_ID_RE = re.compile(r"\b([A-Za-z]{2,})(\d{3,})(?![\d/\-])")
+# Phone number: an optional +country code then a run of 8-13 digits (may contain
+# spaces/dashes). Spoken digit-by-digit in English so it is NOT read as a giant
+# currency-style number ("nine crore...").
+_PHONE_RE = re.compile(r"(?<![\w])(\+?\d[\d\s\-]{7,}\d)(?![\w])")
+
+
+def _id_sub(match: re.Match[str]) -> str:
+    return f"{match.group(1)}, {_spell_digits(match.group(2))}"
+
+
+def _phone_sub(match: re.Match[str]) -> str:
+    raw = match.group(1)
+    plus = raw.strip().startswith("+")
+    digits = re.sub(r"\D", "", raw)
+    # Only treat 8-13 digit runs as phone numbers; otherwise leave alone.
+    if not (8 <= len(digits) <= 13):
+        return match.group(0)
+    spoken = _spell_digits(digits)
+    return ("plus " + spoken) if plus else spoken
+
+
+def humanize_spoken_text(text: str, language_code: str | None, language_id: str | None = None) -> str:
+    """Make business numbers speak cleanly through eleven_v3.
+
+    Spoken in ENGLISH regardless of sentence language (eleven_v3 mangles these in
+    Indic scripts, and they are language-neutral business identifiers):
+      - invoice IDs / references  -> "DHL, one two three four five six"
+      - phone numbers             -> digit-by-digit ("zero nine four one ...")
+      - currency amounts          -> English words + "Rupees" (never "INR"/₹)
+
+    Left in the sentence's own language for ElevenLabs to normalize in-language
+    (apply_text_normalization=on + language_code), so Hindi says "teen" not
+    "three" and dates read naturally:
+      - counts (number of invoices), overdue days, plain numbers
+      - dates
+    EXCEPTION: for an English sentence everything is English anyway, so convert
+    counts/dates/numbers to English words too."""
+    text = _to_ascii_digits(text)
+
+    # We only hard-convert the three things ElevenLabs CANNOT infer or gets wrong:
+    # phone numbers, invoice IDs, and currency (Indian lakh/crore + forced
+    # "Rupees"). Everything else — plain counts ("3 invoices"), overdue days,
+    # and DATES — is left as digits and handled by ElevenLabs text normalization
+    # (apply_text_normalization=on + language_code), which speaks them correctly
+    # in the sentence's language ("teen" in Hindi, "three" in English) without us
+    # maintaining number/date spelling tables.
+
+    # Reformat ISO date -> "day month year" digit order so normalization reads it
+    # as a date, not three separate numbers. Stays numeric/in-language.
+    text = _ISO_DATE_RE.sub(_spoken_iso_date_numeric, text)
+
+    # Phones (long digit runs) -> English digit-by-digit. Before IDs/currency, and
+    # after the date reformat so a date isn't mistaken for a phone number.
+    text = _PHONE_RE.sub(_phone_sub, text)
+
+    # Invoice IDs / references (DHL123456) -> letters + digit-by-digit.
+    text = _ID_RE.sub(_id_sub, text)
+
+    # Currency amounts -> English words + "Rupees" (always; Indian lakh/crore).
+    text = _CURRENCY_RE.sub(_currency_sub, text)
+
+    # Collapse an accidental "Rupees Rupees".
+    text = re.sub(r"\bRupees(\s+(?:Rupees|rupees|rupaye|रुपये|रुपए|টাকা|ரூபாய்))+", "Rupees", text)
 
     return text
 
 
-def prepare_sarvam_tts_text(
+def prepare_tts_text(
     text: str,
     language_code: str | None,
     language_id: str | None = None,
 ) -> str:
-    """Normalize spoken text for Bulbul without changing the visible transcript.
+    """Normalize spoken text for the voice without changing the visible transcript.
 
-    This keeps the policy output intact while making business strings like
-    invoice IDs and semicolon-separated lists sound less clipped. When the target
-    language renders in a native script, Latin-script words are transliterated so
-    the voice does not mispronounce them (controlled by SARVAM_TTS_TRANSLITERATE).
+    Keeps the policy output intact while making business strings like invoice IDs
+    and semicolon-separated lists sound less clipped. No transliteration —
+    ElevenLabs Flash multilingual handles English/native code-switch natively.
     """
     cleaned = normalize_whitespace(text)
     if not cleaned:
@@ -2072,30 +2106,23 @@ def prepare_sarvam_tts_text(
 
     cleaned = cleaned.replace("•", ". ")
     cleaned = re.sub(r"\s*[;|]\s*", ". ", cleaned)
-    cleaned = re.sub(r"\b([A-Za-z]{2,})(\d{3,})\b", r"\1 \2", cleaned)
 
-    if SARVAM_TTS_HUMANIZE:
-        cleaned = humanize_spoken_text(cleaned, language_code)
+    if TTS_HUMANIZE:
+        cleaned = humanize_spoken_text(cleaned, language_code, language_id)
 
     cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
     cleaned = re.sub(r"(?<!\d),(?=\S)", ", ", cleaned)
     cleaned = re.sub(r"([.!?])(?=\S)", r"\1 ", cleaned)
 
-    # hinglish deliberately keeps English words in Latin; never transliterate it
-    # even though it shares the hi-IN code with native Hindi.
-    resolved_id = (language_id or "").strip().lower()
-    if (
-        SARVAM_TTS_TRANSLITERATE
-        and resolved_id != "hinglish"
-        and (language_code or "").strip() in _NATIVE_TTS_LANGUAGE_CODES
-    ):
-        cleaned = transliterate_latin_for_tts(cleaned, language_code)
-
-    if (language_code or "").lower() in {"hi-in", "mr-in"}:
-        cleaned = cleaned.replace("₹", " INR ")
-        cleaned = re.sub(r"\bNo\.(?=\s*\d)", "number ", cleaned, flags=re.IGNORECASE)
+    # Any bare ₹ that survived (no following digits) -> the spoken word.
+    cleaned = cleaned.replace("₹", " Rupees ")
+    cleaned = re.sub(r"\bNo\.(?=\s*\d)", "number ", cleaned, flags=re.IGNORECASE)
 
     return normalize_whitespace(cleaned)
+
+
+# Back-compat alias for call sites not yet renamed.
+prepare_sarvam_tts_text = prepare_tts_text
 
 
 def transcript_entries_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2344,6 +2371,47 @@ def total_summary_text(customer: dict[str, Any], invoices: list[dict[str, Any]],
     )
 
 
+def bare_overdue_days_text(invoices: list[dict[str, Any]], language_id: str) -> str:
+    """Just the overdue-days for each invoice — no amounts, no due dates, no recap.
+    For a 'how many days overdue' question."""
+    days = [int(inv.get("overdue_days", 0) or 0) for inv in invoices]
+    if not days:
+        return ""
+    d = ", ".join(str(x) for x in days[:-1]) + (" and " if len(days) > 1 else "") + str(days[-1])
+    # Use a simple "X, Y and Z days" list; the digits are spoken in-language by
+    # ElevenLabs normalization.
+    n = len(days)
+    if language_id in {"hindi", "hinglish"}:
+        parts = ", ".join(f"{x} दिन" for x in days)
+        return f"तीनों invoices इतने दिन से overdue हैं: {parts}." if n == 3 else f"{parts} से overdue हैं."
+    if language_id == "marathi":
+        parts = ", ".join(f"{x} दिवस" for x in days)
+        return f"तिन्ही invoices इतके दिवस overdue आहेत: {parts}."
+    if language_id == "bengali":
+        parts = ", ".join(f"{x} din" for x in days)
+        return f"invoice-gulo eto din overdue: {parts}."
+    if language_id == "tamil":
+        parts = ", ".join(f"{x} days" for x in days)
+        return f"invoices {parts} overdue ஆக உள்ளன."
+    return f"The invoices are {d} days overdue respectively."
+
+
+def bare_total_text(customer: dict[str, Any], invoices: list[dict[str, Any]], language_id: str) -> str:
+    """Just the outstanding total + invoice count — no 'reason for call' preamble,
+    no per-invoice breakdown. For a direct 'what is the total amount' question."""
+    total = format_currency(customer_outstanding(invoices), invoices[0].get("currency", "INR") if invoices else "INR")
+    n = len(invoices)
+    texts = {
+        "hinglish": f"Aapke DHL account par total {total} outstanding hai, {n} invoices overdue hain.",
+        "hindi": f"आपके DHL account पर total {total} outstanding है, {n} invoices overdue हैं.",
+        "marathi": f"तुमच्या DHL account वर एकूण {total} outstanding आहे, {n} invoices overdue आहेत.",
+        "bengali": f"আপনার DHL account-এ মোট {total} outstanding আছে, {n} invoice overdue.",
+        "tamil": f"உங்கள் DHL account-ல் மொத்தம் {total} outstanding உள்ளது, {n} invoices overdue.",
+        "english": f"Your total outstanding is {total} across {n} overdue invoices.",
+    }
+    return texts.get(language_id, texts["english"])
+
+
 def opening_purpose_text(
     customer: dict[str, Any],
     invoices: list[dict[str, Any]],
@@ -2380,6 +2448,8 @@ def opening_purpose_text(
 def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> str:
     interesting = [invoice for invoice in invoices if invoice.get("history")]
     if not interesting:
+        if language_id == "hindi":
+            return "इन invoices पर पहले कोई active dispute नहीं था. अब payment ही pending है."
         if language_id == "hinglish":
             return "In invoices par pehle koi active dispute nahin tha. Ab payment hi pending hai."
         if language_id == "marathi":
@@ -2393,7 +2463,11 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
     lines: list[str] = []
     for invoice in interesting[:2]:
         history = invoice.get("history") or []
-        if language_id == "hinglish":
+        if language_id == "hindi":
+            lines.append(
+                f"{invoice.get('invoice_no')} पर जो पहले issue था, वो resolve हो चुका है और credit note भी issue हो गया था."
+            )
+        elif language_id == "hinglish":
             lines.append(
                 f"{invoice.get('invoice_no')} par jo pehle issue tha, woh resolve ho chuka hai aur credit note bhi issue ho gaya tha."
             )
@@ -2414,7 +2488,9 @@ def resolved_history_text(invoices: list[dict[str, Any]], language_id: str) -> s
                 f"On {invoice.get('invoice_no')}, the earlier issue has already been resolved and the credit note was issued."
             )
         if any("confirmed receipt" in str(item).lower() for item in history):
-            if language_id == "hinglish":
+            if language_id == "hindi":
+                lines.append(f"{invoice.get('invoice_no')} के लिए आपकी side से credit note receipt भी confirm हो चुकी थी.")
+            elif language_id == "hinglish":
                 lines.append(f"Aapki side se credit note receipt bhi confirm ho chuki thi for {invoice.get('invoice_no')}.")
             elif language_id == "marathi":
                 lines.append(f"{invoice.get('invoice_no')} sathi credit note receipt dekhil confirm \u091d\u093e\u0932\u0940 \u0939\u094b\u0924\u0940.")
@@ -2442,11 +2518,14 @@ def count_business_days(start: datetime, end: datetime) -> int:
 def parse_customer_date(text: str) -> tuple[str | None, datetime | None]:
     lowered = normalize_whitespace(text).lower()
     now = datetime.now(UTC)
-    if "today" in lowered:
+    # English + Hindi/Marathi/Hinglish "today" and "tomorrow".
+    if "today" in lowered or re.search(r"आज|aaj|आजच", lowered):
         return ("today", now)
-    if "tomorrow" in lowered:
-        target = now + timedelta(days=1)
-        return ("tomorrow", target)
+    # "kal" is tomorrow in this collections context; परवा/parso = day after.
+    if re.search(r"\bday after\b|परसों|parson|परवा|parva", lowered):
+        return ("day after tomorrow", now + timedelta(days=2))
+    if "tomorrow" in lowered or re.search(r"\bkal\b|कल|उद्या|udya|kaal", lowered):
+        return ("tomorrow", now + timedelta(days=1))
 
     match = re.search(
         r"\b(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+([a-zA-Z]+)(?:\s+(\d{2,4}))?\b",
@@ -2524,7 +2603,17 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
             lowered,
         )),
         "resolved_issues": bool(re.search(
-            r"(?:\b(?:resolved issue|resolved issues|conflict|dispute history|past dispute|credit note)\b|क्रेडिट नोट|पुराना विवाद|पुराना डिस्प्यूट|पहले वाला issue)",
+            r"(?:\b(?:resolved issue|resolved issues|conflict|dispute history|past dispute|"
+            r"any (?:disputes?|issues?)(?: in the past| before| earlier| previously)?|"
+            r"(?:were|was) there (?:any )?(?:disputes?|issues?)|"
+            r"(?:disputes?|issues?) (?:in the past|before|earlier|previously)|"
+            r"had (?:any )?(?:disputes?|issues?)|credit note)\b"
+            r"|क्रेडिट नोट|पुराना विवाद|पुराना डिस्प्यूट|पहले वाला issue"
+            # past-tense dispute QUESTIONS (asking, not raising): "dispute tha",
+            # "koi dispute tha", "past mein dispute", "pehle dispute"
+            r"|(?:कोई )?dispute था|dispute था क्या|डिस्प्यूट था|पास्ट में|past में|"
+            r"पहले (?:कोई )?(?:dispute|डिस्प्यूट|issue|विवाद)|"
+            r"(?:koi |kya koi )?dispute tha|past mein (?:koi )?dispute|pehle (?:koi )?dispute)",
             lowered,
         )),
         "one_at_a_time": bool(re.search(
@@ -2532,7 +2621,11 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
             lowered,
         )),
         "already_paid": bool(re.search(
-            r"(?:\b(?:already paid|i paid|payment done|payment made|we paid|paid it|paid that|paid this)\b|पेमेंट कर दिया|भुगतान कर दिया|पहले ही पेमेंट)",
+            r"(?:\b(?:already paid|i paid|payment done|payment made|we paid|paid it|paid that|paid this"
+            r"|proof of payment|whom (?:do|should) i (?:tell|send|inform)|where (?:do|should) i (?:send|share) (?:the )?(?:proof|receipt))\b"
+            r"|पेमेंट कर दिया|भुगतान कर दिया|पहले ही पेमेंट|payment ho gaya|payment kar diya"
+            # Marathi: "payment already झालं असेल तर कोणाला सांगायचं" (if already paid, whom to tell)
+            r"|payment.*झाल|झालं असेल|झाला असेल|कोणाला सांगाय|कुणाला सांगाय|payment.*केल.*असेल|आधीच payment)",
             lowered,
         )),
         "dispute": bool(re.search(
@@ -2545,6 +2638,14 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
         )),
         "identity_confusion": bool(re.search(
             r"(?:\b(?:who is anthony|i am mark|i am not anthony|this is mark)\b|मैं एंथनी नहीं|मैं मार्क हूँ|मैं मार्क हूं|एंथनी नहीं)",
+            lowered,
+        )),
+        # Customer asks ONLY for how many days overdue (no amounts/dates). Must be
+        # caught before the generic "details" branch which dumps the full recap.
+        "overdue_days_query": bool(re.search(
+            r"(?:\b(?:how many days|how old|days overdue|how (?:long|many days) overdue|just (?:the )?days|only (?:the )?days)\b"
+            r"|कितने दिन|कितने दिनों|दिन कितने|कितना पुराना|कितने din|din kitne|kitne din"
+            r"|किती दिवस|दिवस किती)",
             lowered,
         )),
         "cash_flow": bool(re.search(
@@ -2586,10 +2687,21 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
             lowered,
         )),
         "amount_query": bool(re.search(
-            r"(?:\b(?:how much|what.s the amount|total amount|total outstanding|what do i owe|how much do i owe)\b|कितना amount|कितना पेमेंट|कुल कितना|कुल अमाउंट|टोटल कितना)",
+            r"(?:\b(?:how much|what.s the amount|total amount|total outstanding|what do i owe|how much do i owe"
+            r"|total kitna|amount kitna|kitna (?:amount|pending|outstanding|due|total)|kitna hai)\b"
+            r"|कितना amount|amount कितना|कितना पेमेंट|कुल कितना|कुल अमाउंट|टोटल कितना|टोटल amount कितना|"
+            r"amount कितना|कितना (?:बकाया|due|pending|outstanding)|एकूण किती|किती amount|किती रक्कम)",
             lowered,
         )),
         "repeat_request": bool(re.search(r"(?:\b(?:repeat|say again|come again|pardon|sorry,? what)\b|दुबारा|फिर से|क्या कहा)", lowered)),
+        # Customer asks for the human agent / manager / supervisor's NAME or
+        # CONTACT details (not a transfer demand). Must be caught before the
+        # generic "details"/invoice branches or it recaps invoices instead.
+        "agent_contact_request": bool(re.search(
+            r"(?:\b(?:manager|supervisor|human agent|your agent|collections executive|contact (?:number|details|info)|phone number|whom (?:do|should) i (?:call|contact))\b"
+            r"|मैनेजर|manager|supervisor|सुपरवाइज़र|आपका नाम|आपके manager|manager का (?:नाम|number|नंबर)|contact (?:details|number)|नंबर दे|number दे|किससे बात)",
+            lowered,
+        )),
     }
 
 
@@ -2627,6 +2739,7 @@ FAST_DETERMINISTIC_SIGNAL_NAMES = {
     "count_invoices",
     "which_invoice",
     "amount_query",
+    "overdue_days_query",
     "details",
     "repeat_request",
     "asks_timeline",
@@ -2639,6 +2752,7 @@ FAST_DETERMINISTIC_SIGNAL_NAMES = {
     "approval_pending",
     "discount",
     "human_request",
+    "agent_contact_request",
     "refusal",
     "call_back_later",
 }
@@ -2710,7 +2824,9 @@ def generate_collections_reply(
 
     if count_entries(entries, "assistant") == 0:
         contact = customer_display_name(customer) or "the accounts payable contact"
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            text = f"Good day, {agent_intro_text(language_id, voice)} क्या मैं {contact} से बात कर रहा हूँ?"
+        elif language_id == "hinglish":
             text = f"Good day, {agent_intro_text(language_id, voice)} Kya main {contact} se baat kar raha hoon?"
         elif language_id == "marathi":
             text = f"Good day, {agent_intro_text(language_id, voice)} {contact} \u092f\u093e\u0902\u091a\u094d\u092f\u093e\u0938\u094b\u092c\u0924 \u092e\u0940 \u092c\u094b\u0932\u0924 \u0906\u0939\u0947 \u0915\u093e?"
@@ -2729,7 +2845,14 @@ def generate_collections_reply(
         }
         result = run_tool("transfer_to_human", args)
         tool_calls.append(build_tool_call_entry("transfer_to_human", args, result))
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                "मुझे बहुत अफ़सोस है यह सुन कर. आपकी safety सबसे important है, "
+                "इसलिए मैं अभी इस call को तुरंत human team को escalate कर रहा हूँ.",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "hinglish":
             return (
                 "Mujhe bahut afsos hai yeh sun kar. Aapki safety sabse important hai, "
                 "isliye main abhi is call ko turant human team ko escalate kar raha hoon.",
@@ -2756,6 +2879,24 @@ def generate_collections_reply(
         message = callback.get(language_id, callback["english"])
         return (message, tool_calls, DETERMINISTIC_CHAT_MODEL)
 
+    # Customer asked for the human agent / manager name + contact. Answer with the
+    # details directly — do NOT recap invoices and do NOT trigger a transfer.
+    # Checked before the invoice/details branches so "manager ka naam aur contact
+    # details bata dijiye" never falls through to an invoice recap.
+    if signals["agent_contact_request"]:
+        transfer = customer.get("human_transfer") or HUMAN_AGENT
+        agent_name = str(transfer.get("name", HUMAN_AGENT["name"]))
+        agent_phone = str(transfer.get("phone", HUMAN_AGENT["phone"]))
+        contact = {
+            "english": f"Of course. My manager is {agent_name}, our Collections Executive, and the contact number is {agent_phone}. You can reach out on this number directly.",
+            "hinglish": f"Ji bilkul. Mere manager ka naam {agent_name} hai, woh hamari Collections Executive hain, aur unka contact number {agent_phone} hai. Aap is number par direct call kar sakte hain.",
+            "hindi": f"जी बिल्कुल. मेरे manager का नाम {agent_name} है, वे हमारी Collections Executive हैं, और उनका contact number {agent_phone} है. आप इस number पर direct call कर सकते हैं.",
+            "marathi": f"हो नक्कीच. माझ्या manager चं नाव {agent_name} आहे, त्या आमच्या Collections Executive आहेत, आणि त्यांचा contact number {agent_phone} आहे. तुम्ही या number वर direct call करू शकता.",
+            "bengali": f"অবশ্যই। আমার manager-এর নাম {agent_name}, তিনি আমাদের Collections Executive, এবং তাঁর contact number {agent_phone}. আপনি এই number-এ সরাসরি call করতে পারেন।",
+            "tamil": f"கண்டிப்பாக. என் manager பெயர் {agent_name}, அவர் எங்கள் Collections Executive, அவரது contact number {agent_phone}. இந்த number-க்கு நேரடியாக call செய்யலாம்.",
+        }
+        return (contact.get(language_id, contact["english"]), tool_calls, DETERMINISTIC_CHAT_MODEL)
+
     if count_entries(entries, "assistant") <= 1 and signals["is_affirmative"]:
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
         return (opening_purpose_text(customer, invoices, language_id, voice), tool_calls, DETERMINISTIC_CHAT_MODEL)
@@ -2764,7 +2905,32 @@ def generate_collections_reply(
     # stated yet, do not skip straight to asking for a payment date. Recover by
     # stating the purpose or the invoice details first, depending on what the
     # customer asked.
-    if not purpose_already_stated and not (signals["wrong_contact"] or signals["identity_confusion"]):
+    # A direct "what's the total amount" question gets a concise total ONLY — no
+    # per-invoice breakdown, no reason-for-call preamble, no reason probe. Handled
+    # before the recovery/recap branches so it isn't expanded into a full dump.
+    if signals["amount_query"] and not (signals["overdue_days_query"] or signals["one_at_a_time"] or signals["which_invoice"] or signals["details"]):
+        tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
+        return (bare_total_text(customer, invoices, language_id), tool_calls, DETERMINISTIC_CHAT_MODEL)
+
+    # "How many days overdue" — just the days per invoice, no amounts/dates/recap.
+    # Wins over amount_query and details (the customer explicitly wants only days).
+    if signals["overdue_days_query"]:
+        tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
+        return (bare_overdue_days_text(invoices, language_id), tool_calls, DETERMINISTIC_CHAT_MODEL)
+
+    # Specific actionable intents have their own dedicated branches below — the
+    # recovery guardrail must NOT swallow them into a purpose dump just because
+    # purpose-detection thinks the reason wasn't stated yet.
+    _specific_intent = any(
+        signals.get(k)
+        for k in (
+            "already_paid", "dispute", "resolved_issues", "invoice_copy", "cash_flow",
+            "approval_pending", "will_pay", "asks_timeline", "discount", "payment_options",
+            "agent_contact_request", "call_back_later", "refusal", "human_request", "safety",
+            "overdue_days_query", "amount_query",
+        )
+    )
+    if not purpose_already_stated and not _specific_intent and not (signals["wrong_contact"] or signals["identity_confusion"]):
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
         if signals["one_at_a_time"] or signals["count_invoices"] or signals["which_invoice"] or signals["amount_query"] or signals["details"]:
             lines = " ".join(invoice_summary_line(inv, language_id) for inv in invoices)
@@ -2778,7 +2944,11 @@ def generate_collections_reply(
         return (opening_purpose_text(customer, invoices, language_id, voice), tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if signals["wrong_contact"] or signals["identity_confusion"]:
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            text = (
+                "माफ़ कीजिए confusion के लिए. क्या आप मुझे accounts payable या payments handle करने वाले सही person से connect कर सकते हैं?"
+            )
+        elif language_id == "hinglish":
             text = (
                 "Apologies for the confusion. Kya aap mujhe accounts payable ya payments handle karne wale sahi person se connect kar sakte hain?"
             )
@@ -2797,6 +2967,8 @@ def generate_collections_reply(
             (
                 "That is why I am calling today, and I would like to understand why payment has not been made yet."
                 if language_id == "english"
+                else "इसी लिए call किया है. Payment अभी तक clear क्यों नहीं हुई, यह समझना था."
+                if language_id == "hindi"
                 else "Isi liye call kiya hai. Payment abhi tak clear kyun nahin hui, yeh samajhna tha."
             ),
         ]
@@ -2808,6 +2980,8 @@ def generate_collections_reply(
         ask = (
             "With those issues resolved, may I ask what is holding the payment back now?"
             if language_id == "english"
+            else "अब जब ये issues resolve हो चुके हैं, payment अभी तक hold क्यों है?"
+            if language_id == "hindi"
             else "Ab jab yeh issues resolve ho chuke hain, payment abhi tak hold kyun hai?"
         )
         return (f"{text} {ask}", tool_calls, DETERMINISTIC_CHAT_MODEL)
@@ -2815,7 +2989,13 @@ def generate_collections_reply(
     if signals["one_at_a_time"]:
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
         line = invoice_summary_line(target_invoice, language_id) if target_invoice else ""
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                f"ठीक है, एक-एक करके बताता हूँ. {line} इसके लिए payment कब तक release होगी?",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "hinglish":
             return (
                 f"Theek hai, ek-ek karke batata hoon. {line} Iske liye payment kab tak release hogi?",
                 tool_calls,
@@ -2878,7 +3058,14 @@ def generate_collections_reply(
         )
 
     if signals["asks_timeline"]:
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                "ये invoices already overdue हैं. "
+                "आप next 2 business days के अंदर एक clear payment date बता दीजिए.",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "hinglish":
             return (
                 "Yeh invoices already overdue hain. "
                 "Aap next 2 business days ke andar ek clear payment date bata dijiye.",
@@ -2892,7 +3079,15 @@ def generate_collections_reply(
         )
 
     if signals["discount"]:
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                "Discount approve करने की authority मेरे पास नहीं है. "
+                "लेकिन आप payment की एक clear date दे दें, तो मैं वो note कर लेता हूँ. "
+                "आप कौनसी date दे सकते हैं?",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "hinglish":
             return (
                 "Discount approve karne ka authority mere paas nahin hai. "
                 "Lekin aap payment ki ek clear date de dein, toh main woh note kar leta hoon. "
@@ -2906,8 +3101,32 @@ def generate_collections_reply(
             DETERMINISTIC_CHAT_MODEL,
         )
 
+    # A date only counts as a payment PROMISE when the customer is actually
+    # committing — not when "today"/"tomorrow"/a date appears inside a QUESTION
+    # ("who were you trying to call today?") or a non-payment statement. Without
+    # this guard, "today" in any sentence logged a bogus promise-to-pay.
     raw_date, parsed_date = parse_customer_date(customer_text)
-    if raw_date:
+    # Question detection for the promise guard. Use "?" and interrogative WORDS
+    # (who/what/when/...), NOT auxiliaries like will/can/is — those appear in
+    # commitments ("I WILL pay today") and would wrongly suppress real promises.
+    _is_question = bool(
+        "?" in customer_text
+        or re.search(
+            r"\b(?:who|what|when|where|why|how|which|whom|whose|kaun|kab|kahan|kaise|kitna|kitne)\b",
+            customer_text.lower(),
+        )
+        or re.search(r"कौन|क्या|कब|कहाँ|कैसे|कितन|किसे|किसको|कोण|काय|केव्हा|कुठे|कोणाला|कुणाला", customer_text)
+    )
+    _payment_intent = bool(
+        signals.get("will_pay")
+        or signals.get("cash_flow")
+        or re.search(
+            r"\b(?:pay|payment|clear|release|transfer|settle|kar dunga|kar dungi|de dunga|de dungi)\b"
+            r"|पेमेंट|भुगतान|कर दूँगा|कर दूंगा|दे दूँगा|भरतो|भरेन|करेन",
+            customer_text.lower(),
+        )
+    )
+    if raw_date and _payment_intent and not _is_question:
         if promise_date_is_within_window(parsed_date, int(constants["promise_date_max_business_days"])):
             args = {
                 "account_number": account_number,
@@ -2918,7 +3137,14 @@ def generate_collections_reply(
             result = run_tool("log_promise_to_pay", args)
             tool_calls.append(build_tool_call_entry("log_promise_to_pay", args, result))
             recap = payment_options_text(language_id)
-            if language_id in {"hinglish", "hindi"}:
+            if language_id == "hindi":
+                return (
+                    f"ठीक है, मैंने note कर लिया है कि payment {raw_date} तक release होगी. "
+                    f"Please उस date तक payment clear कर दीजिए. {recap}",
+                    tool_calls,
+                    DETERMINISTIC_CHAT_MODEL,
+                )
+            if language_id == "hinglish":
                 return (
                     f"Theek hai, maine note kar liya hai ki payment {raw_date} tak release hogi. "
                     f"Please us date tak payment clear kar dijiye. {recap}",
@@ -2931,7 +3157,14 @@ def generate_collections_reply(
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
             )
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                f"{raw_date} थोड़ा ज़्यादा दूर लग रहा है. "
+                "Next 2 business days के अंदर एक closer date बता दीजिए.",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "hinglish":
             return (
                 f"{raw_date} thoda zyada door lag raha hai. "
                 "Next 2 business days ke andar ek closer date bata dijiye.",
@@ -2956,7 +3189,14 @@ def generate_collections_reply(
         result = run_tool("log_already_paid", args)
         tool_calls.append(build_tool_call_entry("log_already_paid", args, result))
         email = constants["proof_of_payment_email"]
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                f"ठीक है, thank you. Transaction reference number और paid date share कर दीजिए. "
+                f"Payment proof {email} पर email कर दीजिए, हम 24 hours के अंदर verify कर लेंगे.",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "hinglish":
             return (
                 f"Theek hai, thank you. Transaction reference number aur paid date share kar dijiye. "
                 f"Payment proof {email} par email kar dijiye, hum 24 hours ke andar verify kar lenge.",
@@ -2977,7 +3217,15 @@ def generate_collections_reply(
         }
         result = run_tool("resend_invoice", args)
         tool_calls.append(build_tool_call_entry("resend_invoice", args, result))
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                f"बिल्कुल. आप पहले DHL MyBill portal पर registered email से login करके invoice देख सकते हैं. "
+                f"अगर convenient हो, मैंने {customer.get('registered_email')} पर invoice resend भी trigger कर दिया है. "
+                "Invoice मिलते ही please check करके payment arrange कर दीजिए.",
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
+        if language_id == "hinglish":
             return (
                 f"Bilkul. Aap pehle DHL MyBill portal par registered email se login karke invoice dekh sakte hain. "
                 f"Agar convenient ho, maine {customer.get('registered_email')} par invoice resend bhi trigger kar diya hai. "
@@ -2993,7 +3241,11 @@ def generate_collections_reply(
             DETERMINISTIC_CHAT_MODEL,
         )
 
-    if signals["dispute"]:
+    # Only RAISING a new dispute reaches here. A past-tense question ("was there
+    # a dispute on this?", "dispute tha kya?") sets resolved_issues, which is
+    # handled earlier and answers from history — never logs a new dispute. Guard
+    # again here in case ordering changes.
+    if signals["dispute"] and not signals["resolved_issues"]:
         invoice_no = target_invoice.get("invoice_no")
         # Dedup: do not log the same invoice's dispute again if it was already
         # logged earlier in this call. The customer often re-states the dispute
@@ -3020,7 +3272,7 @@ def generate_collections_reply(
             tool_calls.append(build_tool_call_entry("log_dispute", args, result))
         ack = {
             "hinglish": "Samajh gaya. Main isko dispute ke taur par log kar raha hoon aur concerned team ko bhej diya jayega. Agar koi undisputed amount hai, kya aap woh meanwhile clear kar sakte hain?",
-            "hindi": "Samajh gaya. Main isko dispute ke taur par log kar raha hoon aur concerned team ko bhej diya jayega. Agar koi undisputed amount hai, kya aap woh meanwhile clear kar sakte hain?",
+            "hindi": "समझ गया. मैं इसको dispute के तौर पर log कर रहा हूँ और concerned team को भेज दिया जाएगा. अगर कोई undisputed amount है, क्या आप वो meanwhile clear कर सकते हैं?",
             "marathi": "समजलं. मी हे dispute म्हणून log करतो आणि संबंधित team कडे पाठवतो. जर काही undisputed amount असेल, तर तुम्ही ती दरम्यान clear करू शकता का?",
             "bengali": "বুঝেছি। আমি এটি dispute হিসেবে log করছি এবং সংশ্লিষ্ট team-এর কাছে পাঠানো হবে। যদি কোনো undisputed amount থাকে, আপনি কি সেটি এর মধ্যে clear করতে পারবেন?",
             "tamil": "புரிகிறது. நான் இதை dispute-ஆக log செய்கிறேன், சம்பந்தப்பட்ட team-க்கு அனுப்பப்படும். ஏதேனும் undisputed amount இருந்தால், அதை இதற்கிடையில் clear செய்ய முடியுமா?",
@@ -3035,12 +3287,19 @@ def generate_collections_reply(
         extra = (
             "If you need the specific Virtual Account Number, I can have the collections desk share it after the call."
             if language_id == "english"
+            else "अगर आपको specific Virtual Account Number चाहिए, तो collections desk call के बाद share कर सकता है."
+            if language_id == "hindi"
             else "Agar aapko specific Virtual Account Number chahiye, toh collections desk call ke baad share kar sakta hai."
         )
         return (f"{payment_options_text(language_id)} {extra}", tool_calls, DETERMINISTIC_CHAT_MODEL)
 
     if signals["cash_flow"]:
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                "समझ सकता हूँ कि cash flow tight हो सकता है. "
+                "आप अभी partial payment कर सकते हैं, या full payment के लिए एक clear date दे सकते हैं?"
+            , tool_calls, DETERMINISTIC_CHAT_MODEL)
+        if language_id == "hinglish":
             return (
                 "Samajh sakta hoon ki cash flow tight ho sakta hai. "
                 "Aap abhi partial payment kar sakte hain, ya full payment ke liye ek clear date de sakte hain?"
@@ -3052,7 +3311,12 @@ def generate_collections_reply(
         )
 
     if signals["approval_pending"]:
-        if language_id in {"hinglish", "hindi"}:
+        if language_id == "hindi":
+            return (
+                "ठीक है. Approver का नाम और expected approval date बता दीजिए. "
+                "Invoice already overdue है, इसको please priority दीजिए."
+            , tool_calls, DETERMINISTIC_CHAT_MODEL)
+        if language_id == "hinglish":
             return (
                 "Theek hai. Approver ka naam aur expected approval date bata dijiye. "
                 "Invoice already overdue hai, isko please priority dijiye."
@@ -3684,8 +3948,8 @@ def text_cost_from_usage(model: str, usage: Any) -> tuple[float, dict[str, int]]
     }
 
 
-def sarvam_tts_cost_from_chars(model: str, char_count: int) -> tuple[float, dict[str, int]]:
-    """Sarvam Bulbul bills per character of output text. We stash the count in
+def tts_cost_from_chars(model: str, char_count: int) -> tuple[float, dict[str, int]]:
+    """ElevenLabs bills per character of output text. We stash the count in
     `text_output_tokens` so the existing ledger summing logic keeps working."""
     chars = max(int(char_count or 0), 0)
     pricing = PRICE_TABLE.get(price_table_key_for_model(model), {})
@@ -3694,14 +3958,19 @@ def sarvam_tts_cost_from_chars(model: str, char_count: int) -> tuple[float, dict
     return cost, {"text_output_tokens": chars}
 
 
-def sarvam_stt_cost_from_seconds(model: str, seconds: float) -> tuple[float, dict[str, int]]:
-    """Sarvam Saarika bills per second of mic audio. We stash whole seconds in
+def stt_cost_from_seconds(model: str, seconds: float) -> tuple[float, dict[str, int]]:
+    """OpenAI STT bills per minute of mic audio; we meter whole seconds in
     `audio_input_tokens` to reuse the existing ledger schema."""
     secs = max(int(math.ceil(float(seconds or 0.0))), 0)
     pricing = PRICE_TABLE.get(price_table_key_for_model(model), {})
     rate = float(pricing.get("audio_input_per_million", 0.0))
     cost = secs * rate / 1_000_000
     return cost, {"audio_input_tokens": secs}
+
+
+# Back-compat aliases for call sites not yet renamed.
+sarvam_tts_cost_from_chars = tts_cost_from_chars
+sarvam_stt_cost_from_seconds = stt_cost_from_seconds
 
 
 def current_stack_pricing_snapshot(ledger: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3715,24 +3984,24 @@ def current_stack_pricing_snapshot(ledger: dict[str, Any] | None = None) -> dict
     return {
         "price_table_version": PRICE_TABLE_VERSION,
         "stack": {
-            "tts_model": SARVAM_TTS_MODEL,
+            "tts_model": ELEVENLABS_TTS_MODEL,
             "stt_model": SARVAM_STT_MODEL,
             "chat_model": CHAT_MODEL,
             "supervisor_model": SUPERVISOR_MODEL,
             "language_coach_model": LANGUAGE_COACH_MODEL,
         },
         "rates": {
-            "sarvam": {
+            "elevenlabs": {
+                "currency": "USD",
+                "tts_usd_per_million_chars": {
+                    ELEVENLABS_TTS_MODEL: ELEVENLABS_USD_PER_MILLION_CHARS,
+                },
+            },
+            "sarvam_stt": {
                 "currency": "INR",
                 "inr_per_usd": SARVAM_INR_PER_USD,
-                "tts_inr_per_10k_chars": {
-                    "bulbul:v3": SARVAM_BULBUL_V3_INR_PER_10K_CHARS,
-                    "bulbul:v2": SARVAM_BULBUL_V2_INR_PER_10K_CHARS,
-                },
                 "stt_inr_per_hour": {
-                    "saaras:v3": SARVAM_STT_INR_PER_HOUR,
-                    "saarika:v2.5": SARVAM_STT_INR_PER_HOUR,
-                    "saarika:v2": SARVAM_STT_INR_PER_HOUR,
+                    SARVAM_STT_MODEL: SARVAM_STT_INR_PER_HOUR,
                 },
             },
             "openai": {
@@ -3742,8 +4011,8 @@ def current_stack_pricing_snapshot(ledger: dict[str, Any] | None = None) -> dict
             },
         },
         "metering": {
-            "sarvam_tts_field": "agent.response_usage.text_output_tokens",
-            "sarvam_stt_field": "agent.transcription_usage.audio_input_tokens",
+            "tts_field": "agent.response_usage.text_output_tokens",
+            "stt_field": "agent.transcription_usage.audio_input_tokens",
             "chat_input_field": "chat_agent.text_input_tokens",
             "chat_cached_input_field": "chat_agent.text_cached_input_tokens",
             "chat_output_field": "chat_agent.text_output_tokens",
@@ -3752,10 +4021,10 @@ def current_stack_pricing_snapshot(ledger: dict[str, Any] | None = None) -> dict
         },
         "observed": {
             "session_id": priced.get("session_id", ""),
-            "sarvam_tts_chars": int(agent["response_usage"]["text_output_tokens"]),
-            "sarvam_tts_cost_usd": float(agent["response_usage"]["estimated_cost_usd"]),
-            "sarvam_stt_seconds": int(agent["transcription_usage"]["audio_input_tokens"]),
-            "sarvam_stt_cost_usd": float(agent["transcription_usage"]["estimated_cost_usd"]),
+            "tts_chars": int(agent["response_usage"]["text_output_tokens"]),
+            "tts_cost_usd": float(agent["response_usage"]["estimated_cost_usd"]),
+            "stt_seconds": int(agent["transcription_usage"]["audio_input_tokens"]),
+            "stt_cost_usd": float(agent["transcription_usage"]["estimated_cost_usd"]),
             "chat_input_tokens": int(chat_agent.get("text_input_tokens", 0)),
             "chat_cached_input_tokens": int(chat_agent.get("text_cached_input_tokens", 0)),
             "chat_output_tokens": int(chat_agent.get("text_output_tokens", 0)),
@@ -4041,7 +4310,7 @@ def record_agent_transcription_usage(
     return ledger_with_combined(save_ledger(ledger))
 
 
-def record_sarvam_tts_usage(
+def record_tts_usage(
     chars: int,
     event_id: str | None = None,
     session_id: str | None = None,
@@ -4050,19 +4319,19 @@ def record_sarvam_tts_usage(
     ledger = load_ledger()
     if session_id and session_id != ledger.get("session_id"):
         debug_cost(
-            "sarvam.tts stale-session skipped",
+            "tts stale-session skipped",
             {"event_id": event_id, "event_session_id": session_id, "ledger_session_id": ledger.get("session_id")},
         )
         return ledger_with_combined(ledger)
     if usage_event_already_recorded(ledger, event_id):
-        debug_cost("sarvam.tts duplicate skipped", {"event_id": event_id})
+        debug_cost("tts duplicate skipped", {"event_id": event_id})
         return ledger_with_combined(ledger)
     agent = ledger["agent"]
-    agent["model"] = model or SARVAM_TTS_MODEL
+    agent["model"] = model or ELEVENLABS_TTS_MODEL
 
-    event_cost, token_map = sarvam_tts_cost_from_chars(agent["model"], chars)
+    event_cost, token_map = tts_cost_from_chars(agent["model"], chars)
     debug_cost(
-        f"sarvam.tts model={agent['model']}",
+        f"tts model={agent['model']}",
         {"chars": chars, "event_cost_usd": event_cost},
     )
     bucket = agent["response_usage"]
@@ -4075,7 +4344,7 @@ def record_sarvam_tts_usage(
     return ledger_with_combined(save_ledger(ledger))
 
 
-def record_sarvam_stt_usage(
+def record_stt_usage(
     seconds: float,
     event_id: str | None = None,
     session_id: str | None = None,
@@ -4084,20 +4353,20 @@ def record_sarvam_stt_usage(
     ledger = load_ledger()
     if session_id and session_id != ledger.get("session_id"):
         debug_cost(
-            "sarvam.stt stale-session skipped",
+            "stt stale-session skipped",
             {"event_id": event_id, "event_session_id": session_id, "ledger_session_id": ledger.get("session_id")},
         )
         return ledger_with_combined(ledger)
     if usage_event_already_recorded(ledger, event_id):
-        debug_cost("sarvam.stt duplicate skipped", {"event_id": event_id})
+        debug_cost("stt duplicate skipped", {"event_id": event_id})
         return ledger_with_combined(ledger)
     agent = ledger["agent"]
     bucket = agent["transcription_usage"]
     bucket["model"] = model or SARVAM_STT_MODEL
 
-    event_cost, token_map = sarvam_stt_cost_from_seconds(bucket["model"], seconds)
+    event_cost, token_map = stt_cost_from_seconds(bucket["model"], seconds)
     debug_cost(
-        f"sarvam.stt model={bucket['model']}",
+        f"stt model={bucket['model']}",
         {"seconds": seconds, "event_cost_usd": event_cost},
     )
     for key, value in token_map.items():
@@ -4106,6 +4375,11 @@ def record_sarvam_stt_usage(
     remember_usage_event(ledger, event_id)
 
     return ledger_with_combined(save_ledger(ledger))
+
+
+# Back-compat aliases for call sites not yet renamed.
+record_sarvam_tts_usage = record_tts_usage
+record_sarvam_stt_usage = record_stt_usage
 
 
 def record_supervisor_usage(model: str, usage: Any) -> dict[str, Any]:
@@ -5022,8 +5296,7 @@ def bootstrap():
     invoices = get_invoices(DEFAULT_ACCOUNT_ID)
     if not customer:
         return error_json(f"Customer fixture {DEFAULT_ACCOUNT_ID} not found.", 500)
-    default_language_code = sarvam_language_code(DEFAULT_LANGUAGE_ID)
-    default_voice = localized_sarvam_voice(DEFAULT_REALTIME_VOICE, default_language_code)
+    default_voice = DEFAULT_REALTIME_VOICE
 
     payload = {
         "account_number": DEFAULT_ACCOUNT_ID,
@@ -5038,13 +5311,13 @@ def bootstrap():
         "costs": ledger_with_combined(load_ledger()),
         "call_history": load_call_history(),
         "config": {
-            "tts_provider": "sarvam",
+            "tts_provider": "elevenlabs",
             "stt_provider": "sarvam",
-            "tts_model": SARVAM_TTS_MODEL,
+            "tts_model": ELEVENLABS_TTS_MODEL,
             "stt_model": SARVAM_STT_MODEL,
-            "realtime_model": SARVAM_TTS_MODEL,  # legacy key kept for frontend cost panel
+            "realtime_model": ELEVENLABS_TTS_MODEL,  # legacy key kept for frontend cost panel
             "supported_realtime_models": [
-                {"id": SARVAM_TTS_MODEL, "label": f"Sarvam Bulbul ({SARVAM_TTS_MODEL})"},
+                {"id": ELEVENLABS_TTS_MODEL, "label": f"ElevenLabs ({ELEVENLABS_TTS_MODEL})"},
             ],
             "realtime_voice": default_voice,
             "transcription_model": SARVAM_STT_MODEL,
@@ -5053,36 +5326,27 @@ def bootstrap():
             "chat_model": CHAT_MODEL,
             "default_language_id": DEFAULT_LANGUAGE_ID,
             "supported_languages": supported_languages_payload(),
-            "sarvam_voices": deepcopy(SARVAM_VOICES),
-            "sarvam_language_codes": dict(SARVAM_LANGUAGE_CODES),
+            "tts_voices": deepcopy(TTS_VOICES),
+            "language_codes": dict(LANGUAGE_CODES),
             "pricing_reference": {
                 "openai_currency": "USD",
-                "sarvam": {
+                "elevenlabs": {
+                    "currency": "USD",
+                    "tts_usd_per_million_chars": {
+                        ELEVENLABS_TTS_MODEL: ELEVENLABS_USD_PER_MILLION_CHARS,
+                    },
+                },
+                "sarvam_stt": {
                     "currency": "INR",
                     "inr_per_usd": SARVAM_INR_PER_USD,
-                    "tts_inr_per_10k_chars": {
-                        "bulbul:v3": SARVAM_BULBUL_V3_INR_PER_10K_CHARS,
-                        "bulbul:v2": SARVAM_BULBUL_V2_INR_PER_10K_CHARS,
-                        "bulbul:v1": SARVAM_BULBUL_V2_INR_PER_10K_CHARS,
-                    },
                     "stt_inr_per_hour": {
-                        "saaras:v3": SARVAM_STT_INR_PER_HOUR,
-                        "saarika:v2.5": SARVAM_STT_INR_PER_HOUR,
-                        "saarika:v2": SARVAM_STT_INR_PER_HOUR,
+                        SARVAM_STT_MODEL: SARVAM_STT_INR_PER_HOUR,
                     },
                 },
             },
-            "tts_sample_rate": SARVAM_TTS_SAMPLE_RATE,
+            "tts_sample_rate": ELEVENLABS_TTS_SAMPLE_RATE_BROWSER,
             "stt_sample_rate": SARVAM_STT_SAMPLE_RATE,
             "stt_mode": SARVAM_STT_MODE,
-            "sarvam_voice_preset": {
-                "id": f"{default_voice}-collections",
-                "speaker": default_voice,
-                "pace": sarvam_tts_pace(sarvam_language_code(DEFAULT_LANGUAGE_ID), default_voice),
-                "temperature": SARVAM_TTS_TEMPERATURE,
-                "sample_rate": SARVAM_TTS_SAMPLE_RATE,
-                "codec": SARVAM_TTS_OUTPUT_CODEC,
-            },
             "telephony": {
                 "provider": "exotel",
                 "enabled": exotel_enabled(),
@@ -5109,21 +5373,23 @@ def invoices_route(account_number: str):
 
 @app.post("/api/session")
 def create_session():
-    """Issue a Sarvam-backed voice session. The frontend then opens
-    /api/tts/stream and /api/stt/stream WebSockets using this session_id.
-    No client secret leaves the backend — the Sarvam API key stays server-side.
+    """Issue a voice session. The frontend then opens /api/tts/stream and
+    /api/stt/stream WebSockets using this session_id. No client secret leaves the
+    backend — the ElevenLabs (TTS) / Sarvam (STT) keys stay server-side.
     """
+    if not ELEVENLABS_API_KEY:
+        return error_json("ELEVENLABS_API_KEY is missing on the backend.", 500)
     if not SARVAM_API_KEY:
         return error_json("SARVAM_API_KEY is missing on the backend.", 500)
 
     body = request.get_json(silent=True) or {}
     requested_session_id = str(body.get("session_id") or "").strip()
     language_id = str(body.get("language_id") or DEFAULT_LANGUAGE_ID)
-    default_voice = localized_sarvam_voice(DEFAULT_REALTIME_VOICE, sarvam_language_code(language_id))
+    default_voice = DEFAULT_REALTIME_VOICE
     voice = str(body.get("voice") or default_voice)
     if voice.lower() not in VOICE_PERSONAS:
         voice = default_voice
-    resolved_tts_voice = localized_sarvam_voice(voice, sarvam_language_code(language_id))
+    resolved_tts_voice = elevenlabs_voice_id(voice)
     session_id = requested_session_id or uuid.uuid4().hex
 
     return success_json(
@@ -5133,14 +5399,14 @@ def create_session():
             "resolved_tts_voice": resolved_tts_voice,
             "agent_persona": persona_for_voice(voice),
             "language_id": language_id,
-            "language_code": sarvam_language_code(language_id),
-            "tts_language_code": sarvam_language_code(language_id),
+            "language_code": language_code_for_id(language_id),
+            "tts_language_code": language_code_for_id(language_id),
             "stt_language_code": sarvam_stt_language_code(language_id),
             "tts_ws_path": "/api/tts/stream",
             "stt_ws_path": "/api/stt/stream",
-            "tts_sample_rate": SARVAM_TTS_SAMPLE_RATE,
+            "tts_sample_rate": ELEVENLABS_TTS_SAMPLE_RATE_BROWSER,
             "stt_sample_rate": SARVAM_STT_SAMPLE_RATE,
-            "tts_model": SARVAM_TTS_MODEL,
+            "tts_model": ELEVENLABS_TTS_MODEL,
             "stt_model": SARVAM_STT_MODEL,
             "stt_mode": SARVAM_STT_MODE,
         }
@@ -5187,7 +5453,7 @@ def exotel_start_call():
     if not get_customer(account_number):
         return error_json(f"Customer fixture {account_number} not found.", 404)
 
-    ledger = default_ledger(realtime_model=SARVAM_TTS_MODEL, transcription_model=SARVAM_STT_MODEL)
+    ledger = default_ledger(realtime_model=ELEVENLABS_TTS_MODEL, transcription_model=SARVAM_STT_MODEL)
     write_json(LEDGER_FILE, ledger)
     session_id = ledger["session_id"]
     session = PhoneCallSession(
@@ -5273,61 +5539,167 @@ def exotel_status():
     return success_json({"ok": True})
 
 
-def _sarvam_tts_rest(text: str, voice: str, language_code: str, *, sample_rate: int | None = None) -> bytes:
-    """Synchronous REST fallback: returns encoded audio bytes from Bulbul v3.
-    Used when streaming WS proxy is unavailable or for short utterances.
-    """
-    if not SARVAM_API_KEY:
-        raise RuntimeError("SARVAM_API_KEY missing")
+def _elevenlabs_tts_url(voice_id: str, sample_rate: int) -> str:
+    """ElevenLabs streaming endpoint emitting raw PCM at the requested rate."""
+    params = urlencode({"output_format": f"pcm_{int(sample_rate)}"})
+    return f"{ELEVENLABS_BASE_URL}/v1/text-to-speech/{voice_id}/stream?{params}"
+
+
+def _tone_tag(tone: str | None) -> str:
+    """Map a tone keyword to an eleven_v3 audio tag prefix (e.g. '[empathetic] ').
+    Empty when tags are disabled, the model isn't v3, or tone is unset/'none'."""
+    if not ELEVENLABS_AUDIO_TAGS or ELEVENLABS_TTS_MODEL not in _AUDIO_TAG_MODELS:
+        return ""
+    t = (tone or ELEVENLABS_TONE_DEFAULT or "").strip().lower()
+    mapping = {
+        "professional": ELEVENLABS_TONE_DEFAULT,
+        "default": ELEVENLABS_TONE_DEFAULT,
+        "empathetic": ELEVENLABS_TONE_EMPATHETIC,
+        "firm": ELEVENLABS_TONE_FIRM,
+    }
+    tag = mapping.get(t, t)
+    if not tag or tag.lower() == "none":
+        return ""
+    return f"[{tag}] "
+
+
+def _elevenlabs_tts_body(
+    text: str,
+    language_id: str | None = None,
+    previous_text: str | None = None,
+    tone: str | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "text": _tone_tag(tone) + text,
+        "model_id": ELEVENLABS_TTS_MODEL,
+        "voice_settings": elevenlabs_voice_settings(),
+        # "on" makes ElevenLabs spell out the numbers/dates we deliberately leave
+        # as digits in the target language (so Hindi "3" -> "teen", dates read
+        # naturally). IDs/phones/amounts are already pre-converted to English.
+        "apply_text_normalization": ELEVENLABS_TEXT_NORMALIZATION,
+    }
+    # Pronunciation dictionary: consistent brand/payment/name pronunciation
+    # (DHL -> "D H L", NEFT spelled, MyBill -> "My Bill"). Alias rules work on all
+    # models incl. eleven_v3; verified on the streaming endpoint.
+    if ELEVENLABS_PRON_DICT_ID and ELEVENLABS_PRON_DICT_VERSION_ID:
+        body["pronunciation_dictionary_locators"] = [
+            {
+                "pronunciation_dictionary_id": ELEVENLABS_PRON_DICT_ID,
+                "version_id": ELEVENLABS_PRON_DICT_VERSION_ID,
+            }
+        ]
+    # Only send language_code for codes ElevenLabs accepts. For other Indic
+    # languages the API 400s on the param even though it can synthesize the text;
+    # omitting it lets the input script drive synthesis instead of failing.
+    code = elevenlabs_language_code(language_id) if language_id else ""
+    if code and code in ELEVENLABS_SUPPORTED_LANGUAGE_CODES:
+        body["language_code"] = code
+    # Prior agent utterance as context so prosody/intonation flows naturally across
+    # turns instead of each reply being synthesized cold. Capped to keep the
+    # request small. NOTE: eleven_v3 REJECTS previous_text/next_text (400
+    # unsupported_model), so only send it on models that accept it.
+    if previous_text and ELEVENLABS_TTS_MODEL not in _NO_CONTINUITY_MODELS:
+        body["previous_text"] = previous_text[-600:]
+    return body
+
+
+def _elevenlabs_tts_stream(
+    text: str,
+    voice_id: str,
+    *,
+    sample_rate: int,
+    language_id: str | None = None,
+    previous_text: str | None = None,
+    tone: str | None = None,
+) -> Any:
+    """Open a streaming ElevenLabs TTS response. Returns the requests.Response so
+    the caller can relay resp.iter_content() chunks (raw int16 LE PCM) and close()
+    it for barge-in cancellation."""
+    if not ELEVENLABS_API_KEY:
+        raise RuntimeError("ELEVENLABS_API_KEY missing")
+    if not voice_id:
+        raise RuntimeError("ElevenLabs voice id missing (set ELEVENLABS_DEFAULT_*).")
     resp = requests.post(
-        f"{SARVAM_BASE_URL}/text-to-speech",
-        headers={
-            "api-subscription-key": SARVAM_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "inputs": [text],
-            **{
-                **sarvam_tts_options(language_code, voice),
-                "speech_sample_rate": int(sample_rate or SARVAM_TTS_SAMPLE_RATE),
-            },
-            "output_audio_codec": SARVAM_TTS_OUTPUT_CODEC,
-        },
+        _elevenlabs_tts_url(voice_id, sample_rate),
+        headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+        json=_elevenlabs_tts_body(text, language_id, previous_text, tone),
+        stream=True,
         timeout=30,
     )
     if not resp.ok:
-        raise RuntimeError(f"Sarvam TTS REST failed {resp.status_code}: {resp.text[:300]}")
-    data = resp.json()
-    audios = data.get("audios") or []
-    if not audios:
-        raise RuntimeError("Sarvam TTS REST returned no audio")
-    # API returns base64 WAV (with header) per utterance.
-    return base64.b64decode(audios[0])
+        detail = ""
+        try:
+            detail = resp.text[:300]
+        except Exception:
+            pass
+        resp.close()
+        raise RuntimeError(f"ElevenLabs TTS failed {resp.status_code}: {detail}")
+    return resp
 
 
-def _open_sarvam_tts_upstream(language_code: str, voice: str, *, sample_rate: int) -> Any:
+def _elevenlabs_tts_rest(
+    text: str,
+    voice_id: str,
+    *,
+    sample_rate: int,
+    language_id: str | None = None,
+    previous_text: str | None = None,
+    tone: str | None = None,
+) -> bytes:
+    """Synchronous fallback: collect the whole PCM stream into bytes."""
+    resp = _elevenlabs_tts_stream(
+        text, voice_id, sample_rate=sample_rate, language_id=language_id,
+        previous_text=previous_text, tone=tone,
+    )
+    try:
+        return resp.content
+    finally:
+        resp.close()
+
+
+def _resample_pcm16(pcm: bytes, in_rate: int, out_rate: int) -> bytes:
+    """Linear-interpolate mono int16 LE PCM from in_rate to out_rate. Used to lift
+    8kHz Exotel telephony audio up to the 24kHz OpenAI realtime STT expects."""
+    if in_rate == out_rate or not pcm:
+        return pcm
+    sample_count = len(pcm) // 2
+    if sample_count <= 0:
+        return pcm
+    samples = struct.unpack("<" + ("h" * sample_count), pcm[: sample_count * 2])
+    ratio = in_rate / out_rate
+    out_len = max(int(sample_count / ratio), 1)
+    out = bytearray(out_len * 2)
+    for i in range(out_len):
+        src = i * ratio
+        i0 = int(src)
+        i1 = min(i0 + 1, sample_count - 1)
+        frac = src - i0
+        value = int(samples[i0] * (1.0 - frac) + samples[i1] * frac)
+        struct.pack_into("<h", out, i * 2, max(-32768, min(32767, value)))
+    return bytes(out)
+
+
+def _sarvam_stt_rest(pcm: bytes, sample_rate: int, language_code: str) -> tuple[str, str]:
+    """REST fallback. Returns (transcript, detected_language_code). Uses Saarika
+    auto-detect so the customer can switch languages mid-call."""
     if not SARVAM_API_KEY:
         raise RuntimeError("SARVAM_API_KEY missing")
-    if not WEBSOCKET_CLIENT_AVAILABLE:
-        raise RuntimeError("websocket-client not installed")
-    url = f"{SARVAM_TTS_WS_URL}?{urlencode({'model': SARVAM_TTS_MODEL, 'send_completion_event': str(SARVAM_TTS_SEND_COMPLETION_EVENT).lower()})}"
-    upstream = ws_client.create_connection(
-        url,
-        header=[f"api-subscription-key: {SARVAM_API_KEY}"],
-        timeout=15,
+    wav_bytes = _pcm_to_wav(pcm, sample_rate)
+    files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+    data = {"language_code": "unknown", "model": SARVAM_STT_MODEL}
+    resp = requests.post(
+        f"{SARVAM_BASE_URL}/speech-to-text",
+        headers={"api-subscription-key": SARVAM_API_KEY},
+        files=files,
+        data=data,
+        timeout=30,
     )
-    upstream.send(json.dumps({
-        "type": "config",
-        "data": {
-            **sarvam_tts_options(language_code, voice),
-            "speech_sample_rate": str(sample_rate),
-            "min_buffer_size": SARVAM_TTS_MIN_BUFFER_SIZE,
-            "max_chunk_length": SARVAM_TTS_MAX_CHUNK_LENGTH,
-            "output_audio_codec": SARVAM_TTS_OUTPUT_CODEC,
-            "output_audio_bitrate": SARVAM_TTS_OUTPUT_BITRATE,
-        },
-    }))
-    return upstream
+    if not resp.ok:
+        raise RuntimeError(f"Sarvam STT failed {resp.status_code}: {resp.text[:300]}")
+    payload = resp.json()
+    transcript = str(payload.get("transcript") or "").strip()
+    detected = str(payload.get("language_code") or language_code or "hi-IN").strip()
+    return transcript, detected
 
 
 @sock.route(EXOTEL_STREAM_PATH)
@@ -5426,7 +5798,7 @@ def exotel_media(ws):
 
 @sock.route("/api/tts/stream")
 def tts_stream(ws):
-    """Browser <-> backend WS for streaming TTS, proxying Sarvam Bulbul WS.
+    """Browser <-> backend WS for streaming TTS, proxying ElevenLabs Flash.
 
     Browser -> backend (JSON text frames):
       {"type": "hello", "session_id": "...", "voice": "...", "language_code": "..."}
@@ -5442,122 +5814,69 @@ def tts_stream(ws):
       {"type": "audio_end", "utterance_id": "...", "chars": N}
       {"type": "error", "message": "..."}
     """
-    if not SARVAM_API_KEY:
-        ws.send(json.dumps({"type": "error", "message": "SARVAM_API_KEY missing on backend"}))
-        return
-    if not WEBSOCKET_CLIENT_AVAILABLE:
-        ws.send(json.dumps({"type": "error", "message": "websocket-client not installed"}))
+    if not ELEVENLABS_API_KEY:
+        ws.send(json.dumps({"type": "error", "message": "ELEVENLABS_API_KEY missing on backend"}))
         return
 
+    sample_rate = ELEVENLABS_TTS_SAMPLE_RATE_BROWSER
     state: dict[str, Any] = {
         "session_id": None,
         "voice": DEFAULT_REALTIME_VOICE,
         "language_code": "hi-IN",
-        "current_upstream": None,
+        "current_resp": None,   # active requests.Response (ElevenLabs stream)
         "current_serial": 0,
         "current_utterance_id": None,
         "current_chars": 0,
+        "last_spoken_text": None,  # prior utterance -> previous_text for prosody
         "stop": False,
     }
     upstream_lock = threading.Lock()
 
-    def open_upstream(language_code: str, voice: str) -> Any:
-        url = f"{SARVAM_TTS_WS_URL}?{urlencode({'model': SARVAM_TTS_MODEL, 'send_completion_event': str(SARVAM_TTS_SEND_COMPLETION_EVENT).lower()})}"
-        upstream = ws_client.create_connection(
-            url,
-            header=[f"api-subscription-key: {SARVAM_API_KEY}"],
-            timeout=15,
-        )
-        upstream.send(json.dumps({
-            "type": "config",
-            "data": {
-                **sarvam_tts_options(language_code, voice),
-                "speech_sample_rate": str(SARVAM_TTS_SAMPLE_RATE),
-                "min_buffer_size": SARVAM_TTS_MIN_BUFFER_SIZE,
-                "max_chunk_length": SARVAM_TTS_MAX_CHUNK_LENGTH,
-                "output_audio_codec": SARVAM_TTS_OUTPUT_CODEC,
-                "output_audio_bitrate": SARVAM_TTS_OUTPUT_BITRATE,
-            },
-        }))
-        return upstream
-
-    def close_upstream(upstream: Any | None) -> None:
-        if upstream is None:
+    def close_resp(resp: Any | None) -> None:
+        if resp is None:
             return
         try:
-            upstream.close()
+            resp.close()
         except Exception:
             pass
 
-    def relay_upstream(upstream: Any, utterance_id: str, chars: int, serial: int) -> None:
-        sent_audio = False
+    def relay_resp(resp: Any, utterance_id: str, chars: int, serial: int) -> None:
         sent_end = False
         try:
-            while not state["stop"]:
-                try:
-                    raw = upstream.recv()
-                except Exception:
-                    break
-                if not raw:
-                    break
-                try:
-                    payload = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
-                except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
+            for chunk in resp.iter_content(chunk_size=4096):
+                if state["stop"] or not chunk:
+                    if state["stop"]:
+                        return
                     continue
-
                 with upstream_lock:
-                    if serial != state["current_serial"] or state["current_upstream"] is not upstream:
+                    if serial != state["current_serial"] or state["current_resp"] is not resp:
                         return
-
-                ptype = str(payload.get("type") or "")
-                data = payload.get("data") or {}
-                event_type = str(data.get("event_type") or payload.get("event_type") or "").lower()
-
-                if ptype == "audio":
-                    b64 = data.get("audio") or ""
-                    if not b64:
-                        continue
-                    try:
-                        pcm_bytes = base64.b64decode(b64)
-                    except Exception:
-                        continue
-                    sent_audio = True
-                    try:
-                        ws.send(pcm_bytes)
-                    except Exception:
-                        return
-                    continue
-
-                if ptype == "error":
-                    msg = data.get("message") or "Sarvam upstream error"
-                    try:
-                        ws.send(json.dumps({"type": "error", "message": str(msg)[:300]}))
-                    except Exception:
-                        pass
+                try:
+                    ws.send(chunk)
+                except Exception:
                     return
-
-                if ptype in {"event", "completion", "completed", "done"} or event_type in {
-                    "completion",
-                    "completed",
-                    "done",
-                    "finish",
-                    "finished",
-                }:
-                    try:
-                        ws.send(json.dumps({"type": "audio_end", "utterance_id": utterance_id, "chars": chars}))
-                    except Exception:
-                        pass
-                    sent_end = True
-                    return
-        finally:
-            close_upstream(upstream)
+            try:
+                ws.send(json.dumps({"type": "audio_end", "utterance_id": utterance_id, "chars": chars}))
+                sent_end = True
+            except Exception:
+                pass
+        except Exception as exc:  # noqa: BLE001
             with upstream_lock:
-                still_active = serial == state["current_serial"] and state["current_upstream"] is upstream
+                still_active = serial == state["current_serial"] and state["current_resp"] is resp
+            if still_active:
+                try:
+                    ws.send(json.dumps({"type": "error", "message": f"ElevenLabs stream error: {str(exc)[:200]}"}))
+                except Exception:
+                    pass
+        finally:
+            close_resp(resp)
+            with upstream_lock:
+                still_active = serial == state["current_serial"] and state["current_resp"] is resp
                 if still_active:
-                    state["current_upstream"] = None
+                    state["current_resp"] = None
                     state["current_utterance_id"] = None
                     state["current_chars"] = 0
-            if sent_audio and not sent_end and still_active:
+            if not sent_end and still_active:
                 try:
                     ws.send(json.dumps({"type": "audio_end", "utterance_id": utterance_id, "chars": chars}))
                 except Exception:
@@ -5589,12 +5908,12 @@ def tts_stream(ws):
 
             if msg_type == "cancel":
                 with upstream_lock:
-                    upstream = state["current_upstream"]
+                    resp = state["current_resp"]
                     state["current_serial"] += 1
-                    state["current_upstream"] = None
+                    state["current_resp"] = None
                     state["current_utterance_id"] = None
                     state["current_chars"] = 0
-                close_upstream(upstream)
+                close_resp(resp)
                 ws.send(json.dumps({"type": "cancelled"}))
                 continue
 
@@ -5604,51 +5923,54 @@ def tts_stream(ws):
                     continue
                 language_code = str(msg.get("language_code") or state["language_code"])
                 language_id = msg.get("language_id")
-                speech_text = prepare_sarvam_tts_text(text, language_code, language_id)
+                speech_text = prepare_tts_text(text, language_code, language_id)
                 if not speech_text:
                     continue
                 utterance_id = str(msg.get("utterance_id") or uuid.uuid4().hex[:10])
                 state["language_code"] = language_code
                 with upstream_lock:
-                    previous_upstream = state["current_upstream"]
+                    previous_resp = state["current_resp"]
                     state["current_serial"] += 1
                     serial = state["current_serial"]
-                    state["current_upstream"] = None
+                    state["current_resp"] = None
                     state["current_utterance_id"] = utterance_id
                     state["current_chars"] = len(speech_text)
-                close_upstream(previous_upstream)
+                close_resp(previous_resp)
+                previous_text = state.get("last_spoken_text")
+                tone = str(msg.get("tone") or "").strip() or None
                 try:
-                    upstream = open_upstream(language_code, state["voice"])
+                    resp = _elevenlabs_tts_stream(
+                        speech_text,
+                        elevenlabs_voice_id(state["voice"]),
+                        sample_rate=sample_rate,
+                        language_id=language_id,
+                        previous_text=previous_text,
+                        tone=tone,
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    ws.send(json.dumps({"type": "error", "message": f"Sarvam TTS connect failed: {str(exc)[:200]}"}))
+                    ws.send(json.dumps({"type": "error", "message": f"ElevenLabs TTS connect failed: {str(exc)[:200]}"}))
                     continue
+                state["last_spoken_text"] = speech_text
                 with upstream_lock:
                     if serial != state["current_serial"]:
-                        close_upstream(upstream)
+                        close_resp(resp)
                         continue
-                    state["current_upstream"] = upstream
-                relay_thread = threading.Thread(
-                    target=relay_upstream,
-                    args=(upstream, utterance_id, len(speech_text), serial),
-                    daemon=True,
-                )
-                relay_thread.start()
+                    state["current_resp"] = resp
 
                 ws.send(json.dumps({
                     "type": "audio_start",
                     "utterance_id": utterance_id,
-                    "sample_rate": SARVAM_TTS_SAMPLE_RATE,
-                    "format": SARVAM_TTS_STREAM_FORMAT,
+                    "sample_rate": sample_rate,
+                    "format": "pcm_s16le",
                 }))
+                relay_thread = threading.Thread(
+                    target=relay_resp,
+                    args=(resp, utterance_id, len(speech_text), serial),
+                    daemon=True,
+                )
+                relay_thread.start()
                 try:
-                    upstream.send(json.dumps({"type": "text", "data": {"text": speech_text}}))
-                    upstream.send(json.dumps({"type": "flush"}))
-                except Exception as exc:  # noqa: BLE001
-                    ws.send(json.dumps({"type": "error", "message": f"Sarvam TTS send failed: {str(exc)[:200]}"}))
-                    close_upstream(upstream)
-                    continue
-                try:
-                    record_sarvam_tts_usage(
+                    record_tts_usage(
                         chars=len(speech_text),
                         event_id=f"tts_{utterance_id}",
                         session_id=state.get("session_id") or None,
@@ -5659,9 +5981,9 @@ def tts_stream(ws):
     finally:
         state["stop"] = True
         with upstream_lock:
-            upstream = state["current_upstream"]
-            state["current_upstream"] = None
-        close_upstream(upstream)
+            resp = state["current_resp"]
+            state["current_resp"] = None
+        close_resp(resp)
 
 
 @sock.route("/api/stt/stream")
@@ -5826,7 +6148,7 @@ def stt_stream(ws):
                 state["audio_seconds_unbilled"] = 0.0
                 if seconds > 0:
                     try:
-                        record_sarvam_stt_usage(
+                        record_stt_usage(
                             seconds=seconds,
                             event_id=f"stt_{uuid.uuid4().hex[:10]}",
                             session_id=state.get("session_id") or None,
@@ -6055,33 +6377,6 @@ def mix_pcm16_le(foreground: bytes, background: bytes) -> bytes:
     return bytes(output)
 
 
-def _sarvam_stt_rest(pcm: bytes, sample_rate: int, language_code: str) -> tuple[str, str]:
-    """Returns (transcript, detected_language_code). Uses Saarika auto-detect
-    so the customer can switch languages mid-call without us forcing hi-IN."""
-    if not SARVAM_API_KEY:
-        raise RuntimeError("SARVAM_API_KEY missing")
-    wav_bytes = _pcm_to_wav(pcm, sample_rate)
-    files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-    data = {
-        # "unknown" lets Saarika detect English vs Indic vs Hinglish per utterance.
-        "language_code": "unknown",
-        "model": SARVAM_STT_MODEL,
-    }
-    resp = requests.post(
-        f"{SARVAM_BASE_URL}/speech-to-text",
-        headers={"api-subscription-key": SARVAM_API_KEY},
-        files=files,
-        data=data,
-        timeout=30,
-    )
-    if not resp.ok:
-        raise RuntimeError(f"Sarvam STT failed {resp.status_code}: {resp.text[:300]}")
-    payload = resp.json()
-    transcript = str(payload.get("transcript") or "").strip()
-    detected = str(payload.get("language_code") or language_code or "hi-IN").strip()
-    return transcript, detected
-
-
 def parse_exotel_call_sid(payload: dict[str, Any] | None, raw_text: str | None = None) -> str:
     if isinstance(payload, dict):
         call_info = payload.get("Call") if isinstance(payload.get("Call"), dict) else payload
@@ -6189,7 +6484,7 @@ class PhoneCallSession:
                 "language_id": self.language_id,
                 "active_language_id": self.active_language_id,
                 "voice": self.voice,
-                "resolved_tts_voice": localized_sarvam_voice(self.voice, sarvam_language_code(self.active_language_id)),
+                "resolved_tts_voice": elevenlabs_voice_id(self.voice),
                 "disposition": self.disposition,
                 "turn_number": self.turn_number,
                 "transcript_count": len(self.transcript),
@@ -6539,7 +6834,7 @@ class PhoneCallSession:
         message = prompts.get(active, prompts["english"])
         self._speak_reply(message)
 
-    def _speak_reply(self, text: str) -> None:
+    def _speak_reply(self, text: str, tone: str | None = None) -> None:
         normalized = normalize_whitespace(text).strip()
         if not normalized:
             return
@@ -6560,22 +6855,22 @@ class PhoneCallSession:
         self.log_event("assistant_reply", {"utterance_id": response_id, "text": normalized})
         threading.Thread(
             target=self._render_and_send_tts,
-            args=(serial, response_id, mark_name, normalized),
+            args=(serial, response_id, mark_name, normalized, tone),
             daemon=True,
         ).start()
 
-    def _render_and_send_tts(self, serial: int, response_id: str, mark_name: str, text: str) -> None:
-        language_code = sarvam_language_code(self.active_language_id)
-        speech_text = prepare_sarvam_tts_text(text, language_code, self.active_language_id)
+    def _render_and_send_tts(self, serial: int, response_id: str, mark_name: str, text: str, tone: str | None = None) -> None:
+        language_code = language_code_for_id(self.active_language_id)
+        speech_text = prepare_tts_text(text, language_code, self.active_language_id)
         if not speech_text:
             return
 
         try:
-            record_sarvam_tts_usage(
+            record_tts_usage(
                 chars=len(speech_text),
                 event_id=f"tts_{response_id}",
                 session_id=self.session_id,
-                model=SARVAM_TTS_MODEL,
+                model=ELEVENLABS_TTS_MODEL,
             )
         except Exception:
             pass
@@ -6584,11 +6879,17 @@ class PhoneCallSession:
         sent_audio_bytes = 0
         send_started_at = time.time()
         logged_first_audio = False
+        voice_id = elevenlabs_voice_id(self.voice)
+        previous_text = getattr(self, "_last_spoken_tts_text", None)
+        self._last_spoken_tts_text = speech_text
         try:
-            upstream = _open_sarvam_tts_upstream(
-                language_code,
-                self.voice,
-                sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
+            upstream = _elevenlabs_tts_stream(
+                speech_text,
+                voice_id,
+                sample_rate=ELEVENLABS_TTS_SAMPLE_RATE_PHONE,
+                language_id=self.active_language_id,
+                previous_text=previous_text,
+                tone=tone,
             )
             with self._lock:
                 if self._stop or serial != self._current_tts_serial:
@@ -6598,70 +6899,38 @@ class PhoneCallSession:
                         pass
                     return
                 self._tts_upstream = upstream
-            upstream.send(json.dumps({"type": "text", "data": {"text": speech_text}}))
-            upstream.send(json.dumps({"type": "flush"}))
 
-            while True:
-                try:
-                    raw = upstream.recv()
-                except Exception:
-                    break
-                if not raw:
-                    break
-                try:
-                    payload = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8"))
-                except (TypeError, json.JSONDecodeError, UnicodeDecodeError):
+            # ElevenLabs streams raw int16 LE PCM at the phone sample rate; relay
+            # each chunk straight onto the Exotel media stream.
+            for chunk in upstream.iter_content(chunk_size=640):
+                if not chunk:
                     continue
                 with self._lock:
                     if self._stop or serial != self._current_tts_serial or self._tts_upstream is not upstream:
                         return
                     stream_sid = self.stream_sid
-                ptype = str(payload.get("type") or "")
-                data = payload.get("data") or {}
-                event_type = str(data.get("event_type") or payload.get("event_type") or "").lower()
-                if ptype == "audio":
-                    b64 = data.get("audio") or ""
-                    if not b64 or not stream_sid:
-                        continue
-                    try:
-                        chunk = base64.b64decode(b64)
-                    except Exception:
-                        continue
-                    if not chunk:
-                        continue
-                    sent_audio_bytes += len(chunk)
-                    if not logged_first_audio:
-                        logged_first_audio = True
-                        self.log_event("tts_first_audio", {"source": "sarvam_stream"})
-                    self._send_pcm_chunk(chunk, ambience_gain=PHONE_AMBIENCE_TTS_GAIN)
+                if not stream_sid:
                     continue
-                if ptype == "error":
-                    raise RuntimeError(str(data.get("message") or "Sarvam upstream error")[:200])
-                if ptype in {"event", "completion", "completed", "done"} or event_type in {
-                    "completion",
-                    "completed",
-                    "done",
-                    "finish",
-                    "finished",
-                }:
-                    break
+                sent_audio_bytes += len(chunk)
+                if not logged_first_audio:
+                    logged_first_audio = True
+                    self.log_event("tts_first_audio", {"source": "elevenlabs_stream"})
+                self._send_pcm_chunk(chunk, ambience_gain=PHONE_AMBIENCE_TTS_GAIN)
 
             if sent_audio_bytes <= 0:
-                raise RuntimeError("Sarvam TTS stream returned no audio")
+                raise RuntimeError("ElevenLabs TTS stream returned no audio")
         except Exception:
             try:
-                wav_bytes = _sarvam_tts_rest(
+                pcm_bytes = _elevenlabs_tts_rest(
                     speech_text,
-                    self.voice,
-                    language_code,
-                    sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
-                )
-                pcm_bytes, _ = _wav_to_pcm(
-                    wav_bytes,
-                    fallback_sample_rate=EXOTEL_STREAM_SAMPLE_RATE,
+                    voice_id,
+                    sample_rate=ELEVENLABS_TTS_SAMPLE_RATE_PHONE,
+                    language_id=self.active_language_id,
+                    previous_text=previous_text,
+                    tone=tone,
                 )
             except Exception as exc:  # noqa: BLE001
-                self._append_transcript("system", f"Sarvam TTS error: {str(exc)[:200]}")
+                self._append_transcript("system", f"TTS error: {str(exc)[:200]}")
                 self.log_event("tts_error", {"message": str(exc)[:200]})
                 with self._lock:
                     if serial == self._current_tts_serial:
@@ -6683,7 +6952,7 @@ class PhoneCallSession:
                 sent_audio_bytes += len(chunk)
                 if not logged_first_audio:
                     logged_first_audio = True
-                    self.log_event("tts_first_audio", {"source": "sarvam_rest_fallback"})
+                    self.log_event("tts_first_audio", {"source": "elevenlabs_rest_fallback"})
                 try:
                     self._send_pcm_chunk(chunk, ambience_gain=PHONE_AMBIENCE_TTS_GAIN)
                 except Exception:
@@ -6859,7 +7128,7 @@ class PhoneCallSession:
                     self._flush_sent_for_current_pause = False
                 if seconds > 0:
                     try:
-                        record_sarvam_stt_usage(
+                        record_stt_usage(
                             seconds=seconds,
                             event_id=f"stt_{uuid.uuid4().hex[:10]}",
                             session_id=self.session_id,
@@ -7147,7 +7416,7 @@ class PhoneCallSession:
 
         self._apply_tool_calls(tool_calls)
         if text and text.strip():
-            self._speak_reply(text)
+            self._speak_reply(text, tone=collections_reply_tone(text, tool_calls))
 
     def _apply_tool_calls(self, calls: list[dict[str, Any]]) -> None:
         if not calls:
@@ -7398,6 +7667,30 @@ def call_history():
     return success_json({"history": load_call_history()})
 
 
+def collections_reply_tone(assistant_text: str, tool_calls: list[dict[str, Any]]) -> str:
+    """Pick an eleven_v3 delivery tone for a collections reply from its content.
+    Empathetic when we're acknowledging hardship / safety / escalation; firm when
+    pressing on overdue/refusal/shipment-stop leverage; professional otherwise."""
+    names = {str((tc or {}).get("name") or "") for tc in (tool_calls or [])}
+    if names & {"transfer_to_human"}:
+        return "empathetic"
+    lowered = (assistant_text or "").casefold()
+    empathetic_cues = (
+        "cash flow", "samajh sakta", "समझ सकता", "समजू शकतो", "afsos", "अफ़सोस",
+        "sorry", "माफ", "क्षमा", "understand", "no problem", "koi baat nahi",
+        "काही हरकत", "call you back", "call karoon", "दोबारा",
+    )
+    firm_cues = (
+        "overdue", "shipment", "stop", "credit-worthi", "priorit", "must", "policy",
+        "agreed terms", "next 2 business days", "clear date", "hold",
+    )
+    if any(cue in lowered for cue in empathetic_cues):
+        return "empathetic"
+    if any(cue in lowered for cue in firm_cues):
+        return "firm"
+    return "professional"
+
+
 @app.post("/api/chat/turn")
 def chat_turn():
     payload = request.get_json(silent=True) or {}
@@ -7441,6 +7734,7 @@ def chat_turn():
             "tool_calls": tool_calls,
             "costs": costs,
             "model": model_label,
+            "tone": collections_reply_tone(text, tool_calls),
         }
     )
 
@@ -7500,6 +7794,7 @@ def customer_turn_unified():
             "tool_calls": tool_calls,
             "costs": costs,
             "model": model_label,
+            "tone": collections_reply_tone(text, tool_calls),
         }
     )
 
@@ -7676,15 +7971,15 @@ def metrics_cost_event():
         return success_json(record_agent_response_usage(model, usage, event_id=event_id, session_id=session_id))
     if source == "agent" and usage_type == "transcription":
         return success_json(record_agent_transcription_usage(usage, event_id=event_id, session_id=session_id))
-    if source == "sarvam" and usage_type == "tts":
+    if source in {"voice", "sarvam"} and usage_type == "tts":
         chars = int(payload.get("chars", 0) or usage.get("chars", 0) or 0)
         return success_json(
-            record_sarvam_tts_usage(chars=chars, event_id=event_id, session_id=session_id, model=model)
+            record_tts_usage(chars=chars, event_id=event_id, session_id=session_id, model=model)
         )
-    if source == "sarvam" and usage_type == "stt":
+    if source in {"voice", "sarvam"} and usage_type == "stt":
         seconds = float(payload.get("seconds", 0.0) or usage.get("seconds", 0.0) or 0.0)
         return success_json(
-            record_sarvam_stt_usage(seconds=seconds, event_id=event_id, session_id=session_id, model=model)
+            record_stt_usage(seconds=seconds, event_id=event_id, session_id=session_id, model=model)
         )
     if source == "supervisor":
         return success_json(record_supervisor_usage(model, usage))

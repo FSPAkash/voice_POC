@@ -163,7 +163,7 @@ export type RealtimeModelOption = {
   label: string
 }
 
-export type SarvamVoiceOption = {
+export type VoiceOption = {
   id: string
   label: string
   gender: 'female' | 'male' | 'neutral'
@@ -171,11 +171,13 @@ export type SarvamVoiceOption = {
 
 export type PricingReference = {
   openai_currency?: 'USD'
-  sarvam?: {
-    currency?: 'INR'
-    inr_per_usd: number
-    tts_inr_per_10k_chars: Record<string, number>
-    stt_inr_per_hour: Record<string, number>
+  elevenlabs?: {
+    currency?: 'USD'
+    tts_usd_per_million_chars: Record<string, number>
+  }
+  openai_stt?: {
+    currency?: 'USD'
+    stt_usd_per_minute: Record<string, number>
   }
 }
 
@@ -237,12 +239,12 @@ export type BootstrapResponse = {
     default_language_id: string
     supported_languages: LanguageOption[]
     chat_model?: string
-    tts_provider?: 'sarvam' | 'openai'
-    stt_provider?: 'sarvam' | 'openai'
+    tts_provider?: 'elevenlabs' | 'sarvam' | 'openai'
+    stt_provider?: 'openai' | 'sarvam'
     tts_model?: string
     stt_model?: string
-    sarvam_voices?: SarvamVoiceOption[]
-    sarvam_language_codes?: Record<string, string>
+    tts_voices?: VoiceOption[]
+    language_codes?: Record<string, string>
     pricing_reference?: PricingReference
     tts_sample_rate?: number
     stt_sample_rate?: number

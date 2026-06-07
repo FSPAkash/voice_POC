@@ -1,25 +1,25 @@
 {
   "agent": {
-    "model": "bulbul:v3",
-    "events": 10,
+    "model": "eleven_v3",
+    "events": 15,
     "response_usage": {
       "text_input_tokens": 0,
       "text_cached_input_tokens": 0,
-      "text_output_tokens": 2368,
+      "text_output_tokens": 2346,
       "audio_input_tokens": 0,
       "audio_cached_input_tokens": 0,
       "audio_output_tokens": 0,
-      "estimated_cost_usd": 0.073901
+      "estimated_cost_usd": 0.1173
     },
     "transcription_usage": {
       "model": "saaras:v3",
-      "audio_input_tokens": 123,
+      "audio_input_tokens": 168,
       "text_input_tokens": 0,
       "text_output_tokens": 0,
-      "estimated_cost_usd": 0.010661
+      "estimated_cost_usd": 0.014565
     },
-    "total_tokens": 2491,
-    "estimated_cost_usd": 0.084562
+    "total_tokens": 2514,
+    "estimated_cost_usd": 0.131865
   },
   "supervisor": {
     "model": "deterministic-supervisor",
@@ -41,35 +41,45 @@
   },
   "chat_agent": {
     "model": "gpt-4.1",
-    "events": 10,
-    "text_input_tokens": 29926,
-    "text_cached_input_tokens": 16640,
-    "text_output_tokens": 849,
-    "total_tokens": 47415,
-    "estimated_cost_usd": 0.074964
+    "events": 8,
+    "text_input_tokens": 9112,
+    "text_cached_input_tokens": 11264,
+    "text_output_tokens": 656,
+    "total_tokens": 21032,
+    "estimated_cost_usd": 0.029104
   },
   "processed_usage_event_ids": [
-    "tts_utt_y1lojb7a",
-    "stt_76d43bea35",
-    "tts_utt_718h9skj",
-    "stt_1fdc662c87",
-    "tts_utt_8vq6y2xw",
-    "stt_b93642b806",
-    "tts_utt_ejlvj2nd",
-    "stt_4886ab7765",
-    "tts_utt_o4hcfqoz",
-    "stt_d629d472f5",
-    "tts_utt_cg3tlkym",
-    "stt_da67bc82b8",
-    "tts_utt_4eshzkpe",
-    "stt_ab0fcb5327",
-    "tts_utt_ja3v6bec",
-    "stt_f015344c75",
-    "tts_utt_fkz45y5v",
-    "stt_ba5a397abc",
-    "tts_utt_hb5b5gux"
+    "tts_utt_a8nhrhtk",
+    "stt_95d79f59cb",
+    "tts_utt_u2ngfrrx",
+    "stt_7a72c88c61",
+    "tts_utt_347ud7bl",
+    "stt_6e7bbb7642",
+    "tts_utt_pjc0a8f9",
+    "stt_f8b018725a",
+    "tts_utt_c2iqs4q4",
+    "stt_97a1641931",
+    "tts_utt_fflq5y4p",
+    "stt_e64b5b1eac",
+    "tts_utt_loupgzlu",
+    "stt_3d7b17ed95",
+    "tts_utt_4hleflnf",
+    "stt_0e0837a1cd",
+    "tts_utt_br6h1rkc",
+    "stt_21584190da",
+    "tts_utt_wvc43zpz",
+    "stt_9d60d35334",
+    "tts_utt_54j6p9fv",
+    "stt_54d7eb847f",
+    "tts_utt_x87xq9uu",
+    "stt_d93a62ce3d",
+    "tts_utt_2sxmq5la",
+    "stt_ebeaea8cdb",
+    "stt_43bc9fdc50",
+    "tts_utt_max24e4d",
+    "tts_utt_ioapue7f"
   ],
-  "session_id": "cost_session_cee0b897e7a0",
-  "updated_at": "2026-06-02T04:30:17.592391+00:00",
-  "price_table_version": "openai+sarvam-pricing-2026-05-29"
+  "session_id": "cost_session_78a72a9d1731",
+  "updated_at": "2026-06-07T12:38:07.087269+00:00",
+  "price_table_version": "openai+elevenlabs+sarvam-stt-pricing-2026-06-07"
 }
