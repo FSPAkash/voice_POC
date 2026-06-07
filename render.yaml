@@ -67,6 +67,8 @@ services:
       - key: ELEVENLABS_TONE_FIRM
         value: firm
       - key: ELEVENLABS_USD_PER_MILLION_CHARS
+        value: "100"
+      - key: ELEVENLABS_USD_PER_MILLION_CHARS_FLASH
         value: "50"
       - key: TTS_HUMANIZE
         value: "1"

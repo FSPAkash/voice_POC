@@ -109,7 +109,8 @@
       "Bash(curl -s -w '  bytes=%{size_download}\\\\n' -X POST -H 'xi-api-key: sk_fb94b34ce103dd0402209614182bb75eb028bc54eadc92fb' -H 'Content-Type: application/json' -d '{\"text\":\"DHL DHL DHL NEFT RTGS\",\"model_id\":\"eleven_v3\",\"pronunciation_dictionary_locators\":[{\"pronunciation_dictionary_id\":\"F6QAB5Afyd7NaPO4vXlb\",\"version_id\":\"wIGQOREyYYlJtadWQFnY\"}]}' https://api.elevenlabs.io/v1/text-to-speech/iB2rIwm9cQCRGWoKDRtX/stream?output_format=pcm_24000 -o /dev/null)",
       "Bash(curl -s -X POST -H 'xi-api-key: sk_fb94b34ce103dd0402209614182bb75eb028bc54eadc92fb' -H 'Content-Type: application/json' -d '{\"rules\":[{\"type\":\"alias\",\"string_to_replace\":\"Gressive\",\"alias\":\"Gressihv\"}]}' https://api.elevenlabs.io/v1/pronunciation-dictionaries/F6QAB5Afyd7NaPO4vXlb/add-rules)",
       "Bash(python -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\('new version:',d.get\\('version_id'\\)\\)\")",
-      "Bash(awk 'NR>=6406 && NR<=7400' backend/app.py)"
+      "Bash(awk 'NR>=6406 && NR<=7400' backend/app.py)",
+      "Bash(python3 -)"
     ],
     "additionalDirectories": [
       "c:\\Users\\AkashPatil\\.claude\\projects\\c--Users-AkashPatil-DHL-POC\\memory"

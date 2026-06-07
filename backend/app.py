@@ -661,9 +661,13 @@ HUMAN_AGENT = {
 # bills TTS per character and Sarvam STT per second of audio, so we express those
 # as synthetic "per million" rates so the existing ledger math stays uniform.
 PRICE_TABLE_VERSION = "openai+elevenlabs+sarvam-stt-pricing-2026-06-07"
-# ElevenLabs list price ~ $0.50 / 1000 chars on paid tiers -> $500/1M chars
-# headline, but credit-based plans land far lower; keep env-overridable.
-ELEVENLABS_USD_PER_MILLION_CHARS = _env_float("ELEVENLABS_USD_PER_MILLION_CHARS", 50.0, minimum=0.0)
+# ElevenLabs API LIST pricing (2026, undiscounted — track real ongoing cost, not
+# the first-month 50% promo). 1 char = 1 credit for v2/v3.
+#   Multilingual v2 / eleven_v3: $0.10 / 1K chars = $100 / 1M chars
+#   Flash / Turbo:               $0.05 / 1K chars = $50  / 1M chars
+# Source: https://elevenlabs.io/pricing/api
+ELEVENLABS_USD_PER_MILLION_CHARS = _env_float("ELEVENLABS_USD_PER_MILLION_CHARS", 100.0, minimum=0.0)
+ELEVENLABS_USD_PER_MILLION_CHARS_FLASH = _env_float("ELEVENLABS_USD_PER_MILLION_CHARS_FLASH", 50.0, minimum=0.0)
 # Sarvam STT bills in INR per hour; convert to USD using a configurable rate.
 SARVAM_INR_PER_USD = _env_float("SARVAM_INR_PER_USD", 96.13, minimum=1.0)
 SARVAM_STT_INR_PER_HOUR = _env_float("SARVAM_STT_INR_PER_HOUR", 30.0, minimum=0.0)
@@ -680,10 +684,10 @@ DEFAULT_PRICE_TABLE = {
         "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS,
     },
     "eleven_flash_v2_5": {
-        "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS,
+        "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS_FLASH,
     },
     "eleven_multilingual_v2": {
-        "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS,
+        "text_output_per_million": ELEVENLABS_USD_PER_MILLION_CHARS_FLASH,
     },
     # Sarvam Saarika (STT). We meter seconds of mic audio in `audio_input_tokens`.
     "saaras:v3": {
