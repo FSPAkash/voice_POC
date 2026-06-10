@@ -44,6 +44,13 @@ export function startExotelCall(body: {
   })
 }
 
+export function endExotelCall(body: { session_id?: string | null }) {
+  return requestJson<{ ok: boolean; cleared?: boolean }>('/api/exotel/calls/reset', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: body.session_id ?? '' }),
+  })
+}
+
 export type ExotelCallSnapshot = {
   session_id: string
   status: string

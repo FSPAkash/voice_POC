@@ -774,6 +774,35 @@
   background: #6b7280;
   box-shadow: none;
 }
+.dialer__hangup {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 140px;
+  padding: 10px 22px;
+  border: none;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(220, 38, 38, 0.3);
+  transition: transform 0.1s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.dialer__hangup svg {
+  width: 16px;
+  height: 16px;
+}
+.dialer__hangup:hover {
+  background: #b91c1c;
+}
+.dialer__hangup:active {
+  transform: scale(0.97);
+}
 .dialer__status {
   margin-top: 2px;
   font-size: 12px;

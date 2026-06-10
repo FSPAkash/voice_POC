@@ -25,6 +25,7 @@ import {
   resetCostLedger,
   resetDemo,
   startExotelCall,
+  endExotelCall,
   fetchExotelActiveCall,
   summarizeCall,
   type CallSummary,
@@ -2813,6 +2814,35 @@ export default function App({ username, onLogout }: AppProps = {}) {
                             : 'Call'}
                     </span>
                   </button>
+
+                  {mobilePhase === 'placed' || mobilePhase === 'ringing' || mobilePhase === 'answered' ? (
+                    <button
+                      type="button"
+                      className="dialer__hangup"
+                      aria-label="End call"
+                      onClick={async () => {
+                        setMobileStatus({ tone: 'ok', text: 'Ending call…' })
+                        try {
+                          await endExotelCall({ session_id: mobileSessionId })
+                          setMobilePhase('ended')
+                          setMobileStatus({ tone: 'ok', text: 'Call ended.' })
+                        } catch (err) {
+                          const msg = err instanceof Error ? err.message : 'Could not end the call.'
+                          setMobileStatus({ tone: 'err', text: msg })
+                        } finally {
+                          setMobileSessionId(null)
+                        }
+                      }}
+                    >
+                      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden focusable="false">
+                        <path
+                          fill="currentColor"
+                          d="M12 9c-1.6 0-3.15.25-4.6.7v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.05a.996.996 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.64c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-1.78 1.79c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.2 11.2 0 0 0-2.66-1.85.998.998 0 0 1-.56-.9V9.7C15.15 9.25 13.6 9 12 9z"
+                        />
+                      </svg>
+                      <span>End call</span>
+                    </button>
+                  ) : null}
 
                   {mobileStatus ? (
                     <div className={`dialer__status dialer__status--${mobileStatus.tone}`} role="status">

@@ -2093,6 +2093,20 @@ def humanize_spoken_text(text: str, language_code: str | None, language_id: str 
     return text
 
 
+# Spoken-only respellings for names the TTS otherwise mangles. The visible
+# transcript keeps the proper spelling ("Ms Sanorita"); only the audio uses the
+# phonetic form. "Senyoreeta" reads as seh-nyoh-ree-tah (Spanish señorita).
+_TTS_NAME_PRONUNCIATIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:Sanorita|Senorita|Señorita)\b", re.IGNORECASE), "Senyoreeta"),
+)
+
+
+def apply_tts_name_pronunciations(text: str) -> str:
+    for pattern, replacement in _TTS_NAME_PRONUNCIATIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def prepare_tts_text(
     text: str,
     language_code: str | None,
@@ -2110,6 +2124,7 @@ def prepare_tts_text(
 
     cleaned = cleaned.replace("•", ". ")
     cleaned = re.sub(r"\s*[;|]\s*", ". ", cleaned)
+    cleaned = apply_tts_name_pronunciations(cleaned)
 
     if TTS_HUMANIZE:
         cleaned = humanize_spoken_text(cleaned, language_code, language_id)
@@ -6742,6 +6757,32 @@ class PhoneCallSession:
             return
         ws.send(json.dumps(payload))
 
+    def _close_transport(self) -> None:
+        """Tear down the Exotel bidirectional stream so the PSTN leg actually drops.
+        Sends a `stop`/`clear` control frame (per Exotel Voice Streaming) and then
+        closes the socket. This is what reliably ends the call — the REST hangup is
+        a best-effort secondary path. Idempotent and never raises."""
+        with self._lock:
+            ws = self._ws
+            self._ws = None
+            stream_sid = self.stream_sid
+        if ws is None:
+            return
+        for frame in (
+            {"event": "clear", "stream_sid": stream_sid} if stream_sid else None,
+            {"event": "stop", "stream_sid": stream_sid} if stream_sid else {"event": "stop"},
+        ):
+            if frame is None:
+                continue
+            try:
+                ws.send(json.dumps(frame))
+            except Exception:  # noqa: BLE001
+                break
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _append_transcript(self, role: str, text: str, *, entry_id: str | None = None, status: str = "final") -> None:
         normalized = normalize_whitespace(text).strip()
         if not normalized:
@@ -6979,8 +7020,13 @@ class PhoneCallSession:
         self.finish(f"completed_{reason}")
 
     def _hangup_exotel_call(self) -> None:
-        """Ask Exotel to hang up the live call leg. Best-effort; the session is
+        """Hang up the live call leg. The reliable path is closing the bidirectional
+        WebSocket stream (Exotel drops the PSTN leg when the stream ends); the REST
+        call is a best-effort secondary. Best-effort overall; the session is
         finalized regardless so the demo always wraps up cleanly."""
+        # Primary: end the media stream -> Exotel tears down the call.
+        self._close_transport()
+        # Secondary: REST hangup (some Exotel accounts honor a status update).
         call_sid = (self.call_sid or "").strip()
         if not call_sid or not exotel_enabled():
             return
@@ -7763,6 +7809,7 @@ class PhoneCallSession:
             timer.cancel()
         self._close_stt_upstream(reset_billing=True)
         self._cancel_active_playback("call_finished")
+        self._close_transport()
         self.log_event("call_finished", {"reason": reason})
         if self.transcript or self.tool_calls:
             # Summary generation is the risky (LLM) step. Isolate it so a summary
