@@ -2856,6 +2856,73 @@ def looks_like_repeat_request(text: str) -> bool:
     ))
 
 
+def strip_trailing_question(text: str) -> str:
+    """Drop a single trailing interrogative sentence so a re-read restates the facts
+    without re-asking. Keeps non-question content intact; returns "" if the whole
+    thing was one question (caller falls back to re-reading the original)."""
+    cleaned = normalize_whitespace(text)
+    if not cleaned:
+        return ""
+    # Split into sentences keeping terminators.
+    parts = re.findall(r"[^.!?।]*[.!?।]|[^.!?।]+$", cleaned)
+    parts = [p.strip() for p in parts if p and p.strip()]
+    if len(parts) <= 1:
+        return "" if cleaned.endswith("?") else cleaned
+    # Drop trailing sentences that are questions.
+    while parts and (parts[-1].endswith("?")
+                     or re.search(r"\b(?:could you|can you|would you|is there|kya|क्या|कब|kab)\b",
+                                  parts[-1].lower())):
+        parts.pop()
+    return normalize_whitespace(" ".join(parts))
+
+
+# Repeat lead-ins (all rendered languages) the agent prepends when re-reading a
+# prior turn. Stripped before re-prefixing so repeats-of-repeats don't stack.
+_REPEAT_LEAD_IN_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"sure,?\s*let me repeat that\.?"
+    r"|bilkul,?\s*main dobara batata hoon\.?"
+    r"|ज़रूर,?\s*मैं दोबारा बताता हूँ\.?"
+    r"|नक्की,?\s*मी पुन्हा सांगतो\.?"
+    r"|অবশ্যই,?\s*আমি আবার বলছি\.?"
+    r"|கண்டிப்பாக,?\s*மீண்டும் சொல்கிறேன்\.?"
+    r")\s*",
+    re.IGNORECASE,
+)
+
+
+# Leading politeness fillers ("Sure,", "Of course,", "Okay,", "Bilkul,", ...) that
+# would double up with the repeat lead-in ("Sure, let me repeat that. Sure, here...").
+_LEADING_FILLER_PATTERN = re.compile(
+    r"^\s*(?:sure|of course|certainly|okay|ok|alright|no problem|bilkul|theek hai|"
+    r"ज़रूर|जरूर|ठीक है|नक्की|अवश्य|অবশ্যই|நிச்சயமாக|கண்டிப்பாக)\s*[,.।]?\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_repeat_lead_in(text: str) -> str:
+    """Remove any stacked repeat lead-ins from the front of a prior agent turn."""
+    cleaned = normalize_whitespace(text)
+    while True:
+        stripped = _REPEAT_LEAD_IN_PATTERN.sub("", cleaned, count=1)
+        if stripped == cleaned:
+            break
+        cleaned = normalize_whitespace(stripped)
+    return cleaned
+
+
+def strip_leading_filler(text: str) -> str:
+    """Drop a single leading politeness filler so the repeat lead-in doesn't double
+    it ("Sure, let me repeat that. Sure, here are..."). Only strips when meaningful
+    content remains, so a bare "Sure." is left intact."""
+    cleaned = normalize_whitespace(text)
+    stripped = normalize_whitespace(_LEADING_FILLER_PATTERN.sub("", cleaned, count=1))
+    if stripped and len(stripped) >= 8:
+        # Re-capitalize the new first letter for a clean restatement.
+        return stripped[0].upper() + stripped[1:] if stripped[0].isascii() else stripped
+    return cleaned
+
+
 def should_use_fast_deterministic_turn(messages: list[dict[str, Any]]) -> bool:
     entries = transcript_entries_from_messages(messages)
     latest_customer = last_entry(entries, "customer")
@@ -3231,6 +3298,34 @@ def generate_collections_reply(
         )
 
     if signals["repeat_request"]:
+        # Re-speak what the customer ACTUALLY just heard — the prior agent turn —
+        # not a canned different summary. "Can you repeat that?" after the invoice
+        # breakdown must re-read the breakdown, not collapse to the total + a new
+        # question. Strip any trailing question so the repeat is a clean restatement,
+        # then re-attach a single follow-up. Falls back to the total summary only
+        # when there is no prior agent turn to echo.
+        prior_assistant = last_entry(entries, "assistant")
+        prior_text = normalize_whitespace((prior_assistant or {}).get("text") or "")
+        if prior_text:
+            # Strip any repeat lead-in already on the prior turn so repeats-of-repeats
+            # don't stack "Sure, let me repeat that. Sure, let me repeat that. ...".
+            # Also drop the prior turn's own leading "Sure,"/"Okay," so it doesn't
+            # double up with the lead-in's "Sure,".
+            base = strip_leading_filler(strip_repeat_lead_in(prior_text))
+            restated = strip_trailing_question(base) or base
+            lead = {
+                "english": "Sure, let me repeat that. ",
+                "hinglish": "Bilkul, main dobara batata hoon. ",
+                "hindi": "ज़रूर, मैं दोबारा बताता हूँ. ",
+                "marathi": "नक्की, मी पुन्हा सांगतो. ",
+                "bengali": "অবশ্যই, আমি আবার বলছি. ",
+                "tamil": "கண்டிப்பாக, மீண்டும் சொல்கிறேன். ",
+            }
+            return (
+                normalize_whitespace(lead.get(language_id, lead["english"]) + restated),
+                tool_calls,
+                DETERMINISTIC_CHAT_MODEL,
+            )
         if language_id in {"hinglish", "hindi"}:
             return (
                 (

@@ -1,25 +1,25 @@
 {
   "agent": {
     "model": "eleven_v3",
-    "events": 2,
+    "events": 6,
     "response_usage": {
       "text_input_tokens": 0,
       "text_cached_input_tokens": 0,
-      "text_output_tokens": 354,
+      "text_output_tokens": 2011,
       "audio_input_tokens": 0,
       "audio_cached_input_tokens": 0,
       "audio_output_tokens": 0,
-      "estimated_cost_usd": 0.0354
+      "estimated_cost_usd": 0.2011
     },
     "transcription_usage": {
       "model": "saaras:v3",
-      "audio_input_tokens": 17,
+      "audio_input_tokens": 47,
       "text_input_tokens": 0,
       "text_output_tokens": 0,
-      "estimated_cost_usd": 0.001474
+      "estimated_cost_usd": 0.004075
     },
-    "total_tokens": 371,
-    "estimated_cost_usd": 0.036874
+    "total_tokens": 2058,
+    "estimated_cost_usd": 0.205175
   },
   "supervisor": {
     "model": "deterministic-supervisor",
@@ -41,20 +41,27 @@
   },
   "chat_agent": {
     "model": "gpt-4.1",
-    "events": 1,
-    "text_input_tokens": 2399,
-    "text_cached_input_tokens": 0,
-    "text_output_tokens": 55,
-    "total_tokens": 2454,
-    "estimated_cost_usd": 0.005238
+    "events": 2,
+    "text_input_tokens": 1134,
+    "text_cached_input_tokens": 4096,
+    "text_output_tokens": 214,
+    "total_tokens": 5444,
+    "estimated_cost_usd": 0.006028
   },
   "processed_usage_event_ids": [
-    "tts_utt_swtxfsze",
-    "stt_a97af1272e",
-    "tts_utt_iiz3nn9a",
-    "stt_46254de35c"
+    "tts_utt_471xa1lv",
+    "stt_8b2724e9a0",
+    "tts_utt_yextxlnb",
+    "stt_564d238549",
+    "tts_utt_pavv3d7g",
+    "stt_197fe62479",
+    "tts_utt_5njx6te2",
+    "stt_40810be708",
+    "tts_utt_psofh1zj",
+    "stt_b97be453e7",
+    "tts_utt_8it5hbrw"
   ],
-  "session_id": "cost_session_922433ec01b7",
-  "updated_at": "2026-06-10T07:41:31.425191+00:00",
+  "session_id": "cost_session_488de8f7fd17",
+  "updated_at": "2026-06-10T10:30:19.279939+00:00",
   "price_table_version": "openai+elevenlabs+sarvam-stt-pricing-2026-06-07"
 }

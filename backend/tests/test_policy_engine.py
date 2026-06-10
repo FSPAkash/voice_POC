@@ -449,7 +449,10 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertIn("one at a time", text.lower())
         self.assertTrue(any(call["name"] == "get_invoices" for call in tool_calls))
 
-    def test_repeat_request_branch_stays_short_and_on_tree(self) -> None:
+    def test_repeat_request_rereads_prior_agent_turn(self) -> None:
+        # A repeat request must re-speak what the customer actually just heard (the
+        # prior agent turn), not collapse to a canned different summary. Here the
+        # prior turn was an intro, so the repeat restates the intro facts.
         messages = [
             {
                 "role": "assistant",
@@ -467,9 +470,34 @@ class PolicyEngineTests(unittest.TestCase):
 
         self.assertIsNone(error)
         self.assertEqual(usage_events, [])
-        self.assertIn("let me keep it simple", text.lower())
-        self.assertNotIn("DHL123456", text)
+        lowered = text.lower()
+        self.assertIn("repeat", lowered)  # acknowledges the repeat request
+        self.assertIn("dhl express india", lowered)  # re-reads the prior turn's content
+        self.assertNotIn("DHL123456", text)  # never invents invoice details
         self.assertEqual(tool_calls, [])
+
+    def test_repeat_request_rereads_invoice_breakdown(self) -> None:
+        # The reported bug: after hearing the per-invoice breakdown, "repeat that"
+        # must re-read THAT breakdown, not drop to the bare total + a new question.
+        breakdown = (
+            "Sure, here are the details: Invoice DHL123456 for Duty Import is INR 13,600, "
+            "due since 31st January 2026. Invoice DHL654321 for Freight Export is INR 34,650, "
+            "due since 22nd February 2026. The total outstanding is INR 57,920."
+        )
+        messages = [
+            {"role": "customer", "text": "Can you give me the breakdown?"},
+            {"role": "assistant", "text": breakdown},
+            {"role": "customer", "text": "Sorry, can you repeat that?"},
+        ]
+        text, tool_calls, _ = policy_app.generate_collections_reply(
+            messages,
+            "DHL001",
+            "shubh",
+            {"suggested_language_id": "english"},
+            [],
+        )
+        self.assertIn("DHL123456", text)
+        self.assertIn("DHL654321", text)
 
     def test_phone_session_recent_barge_in_keeps_short_final_confirmation(self) -> None:
         session = policy_app.PhoneCallSession(
