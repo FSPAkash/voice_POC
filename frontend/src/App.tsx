@@ -67,7 +67,7 @@ type TabId = 'call' | 'wrap' | 'supervisor'
 const MOBILE_CONTACTS: { name: string; number: string }[] = [
   { name: 'Akash', number: '+919136152622' },
   { name: 'Sanjay', number: '+919930089520' },
-  { name: 'Anirudh', number: '+918939928854' },
+  { name: 'Anirudh', number: '+919080495851' },
 ]
 type InteractionMode = 'voice' | 'chat' | 'mobile'
 type PricingCard = {
@@ -458,6 +458,13 @@ export default function App({ username, onLogout }: AppProps = {}) {
   // Delivery tone for the next spoken reply (from /api/chat/turn). Drives the
   // eleven_v3 audio tag (empathetic/firm/professional) on the backend TTS proxy.
   const currentToneRef = useRef<string>('')
+  // When the backend flags a terminal outcome, the agent speaks a parting line
+  // and we end the call once that final utterance finishes playing.
+  const pendingEndCallRef = useRef<string>('')
+  // Fallback timer: if the parting-line playback-end event never fires (barge-in,
+  // dropped audio_end, etc.) we still hang up so the call doesn't hang open after
+  // a terminal outcome. Cleared when the normal playback-end path ends the call.
+  const endCallWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const turnNumberRef = useRef(0)
   const bootstrapRequestIdRef = useRef(0)
   const callStartRef = useRef<number | null>(null)
@@ -1121,14 +1128,20 @@ export default function App({ username, onLogout }: AppProps = {}) {
       applyBackendToolCalls(result.tool_calls)
 
       if (result.assistant_text && result.assistant_text.trim()) {
-        lastApprovedScriptRef.current = result.assistant_text
+        let spoken = result.assistant_text
+        if (result.end_call && result.parting_message && result.parting_message.trim()) {
+          spoken = `${result.assistant_text.trim()} ${result.parting_message.trim()}`
+          pendingEndCallRef.current = result.end_reason || 'completed'
+          armEndCallWatchdog(spoken.length)
+        }
+        lastApprovedScriptRef.current = spoken
         currentToneRef.current = result.tone || ''
         voiceClientRef.current?.setTone(result.tone || '')
-        queueResponseCreate(buildScriptedResponse(result.assistant_text))
+        queueResponseCreate(buildScriptedResponse(spoken))
         pushAgentActivity({
           agent: 'caller',
           status: 'completed',
-          summary: `Approved reply ready (${result.model})`,
+          summary: result.end_call ? `Wrapping up call (${result.end_reason})` : `Approved reply ready (${result.model})`,
         })
         return
       }
@@ -1275,14 +1288,20 @@ export default function App({ username, onLogout }: AppProps = {}) {
       applyBackendToolCalls(result.tool_calls)
 
       if (result.assistant_text && result.assistant_text.trim()) {
-        lastApprovedScriptRef.current = result.assistant_text
+        let spoken = result.assistant_text
+        if (result.end_call && result.parting_message && result.parting_message.trim()) {
+          spoken = `${result.assistant_text.trim()} ${result.parting_message.trim()}`
+          pendingEndCallRef.current = result.end_reason || 'completed'
+          armEndCallWatchdog(spoken.length)
+        }
+        lastApprovedScriptRef.current = spoken
         currentToneRef.current = result.tone || ''
         voiceClientRef.current?.setTone(result.tone || '')
-        queueResponseCreate(buildScriptedResponse(result.assistant_text))
+        queueResponseCreate(buildScriptedResponse(spoken))
         pushAgentActivity({
           agent: 'caller',
           status: 'completed',
-          summary: `Approved reply ready (${result.model})`,
+          summary: result.end_call ? `Wrapping up call (${result.end_reason})` : `Approved reply ready (${result.model})`,
         })
         return
       }
@@ -1890,6 +1909,13 @@ export default function App({ username, onLogout }: AppProps = {}) {
           usage: {},
           chars,
         } as unknown as CostEventPayload)
+        // Terminal outcome: the parting line just finished playing -> end the call.
+        if (pendingEndCallRef.current) {
+          const reason = pendingEndCallRef.current
+          pendingEndCallRef.current = ''
+          pushAgentActivity({ agent: 'caller', status: 'completed', summary: `Call ended (${reason})` })
+          void endCall()
+        }
       }
 
       client.setListeners({
@@ -2010,6 +2036,11 @@ export default function App({ username, onLogout }: AppProps = {}) {
 
       startTransition(() => setCallState('connected'))
       activeResponseIdRef.current = null
+      pendingEndCallRef.current = ''
+      if (endCallWatchdogRef.current) {
+        clearTimeout(endCallWatchdogRef.current)
+        endCallWatchdogRef.current = null
+      }
       pendingResponseQueueRef.current = []
       pendingSessionUpdateRef.current = null
 
@@ -2030,8 +2061,32 @@ export default function App({ username, onLogout }: AppProps = {}) {
     }
   }
 
+  // Arm a fallback hang-up so a terminal outcome always ends the call even if the
+  // parting-line playback-end event is missed. Generous upper bound on speech
+  // duration (~95ms/char) plus a buffer; the normal playback-end path clears it.
+  const armEndCallWatchdog = (chars: number) => {
+    if (endCallWatchdogRef.current) clearTimeout(endCallWatchdogRef.current)
+    const estimatedMs = Math.min(60000, Math.max(8000, Math.round(chars * 95) + 6000))
+    endCallWatchdogRef.current = setTimeout(() => {
+      endCallWatchdogRef.current = null
+      if (pendingEndCallRef.current && callStateRef.current !== 'ending') {
+        const reason = pendingEndCallRef.current
+        pendingEndCallRef.current = ''
+        pushAgentActivity({ agent: 'caller', status: 'completed', summary: `Call ended (${reason}, fallback)` })
+        void endCall()
+      }
+    }, estimatedMs)
+  }
+
   const endCall = async () => {
     if (!bootstrapRef.current) return
+    // Idempotent: a parting-line playback-end and the wrap-up watchdog can both
+    // fire — only the first should run the teardown.
+    if (callStateRef.current === 'ending') return
+    if (endCallWatchdogRef.current) {
+      clearTimeout(endCallWatchdogRef.current)
+      endCallWatchdogRef.current = null
+    }
 
     setCallState('ending')
     closeMediaResources()

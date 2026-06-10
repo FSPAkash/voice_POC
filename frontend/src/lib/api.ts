@@ -188,6 +188,9 @@ export function chatTurn(body: {
     costs: CostState
     model: string
     tone?: string
+    end_call?: boolean
+    end_reason?: string
+    parting_message?: string
   }>('/api/chat/turn', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -211,6 +214,9 @@ export function customerTurn(body: {
     costs: CostState
     model: string
     tone?: string
+    end_call?: boolean
+    end_reason?: string
+    parting_message?: string
   }>('/api/turn/customer', {
     method: 'POST',
     body: JSON.stringify(body),

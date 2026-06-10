@@ -2531,6 +2531,33 @@ def parse_customer_date(text: str) -> tuple[str | None, datetime | None]:
     if "tomorrow" in lowered or re.search(r"\bkal\b|कल|उद्या|udya|kaal", lowered):
         return ("tomorrow", now + timedelta(days=1))
 
+    # Relative pay windows: "in the next two days", "in 2 days", "within a couple of
+    # days", "do din mein", "दो दिन में". Map the word/number to a concrete date so
+    # the promise-to-pay window check accepts it. "couple"/"few" -> 2.
+    _word_num = {
+        "a": 1, "an": 1, "one": 1, "ek": 1, "एक": 1, "two": 2, "couple": 2,
+        "few": 2, "do": 2, "दो": 2, "दोन": 2, "three": 3, "teen": 3, "तीन": 3,
+        "char": 4, "four": 4,
+    }
+    rel = re.search(
+        r"(?:in|within|next|after|by)\s+(?:the\s+)?(?:next\s+)?"
+        r"(a|an|one|two|three|four|couple(?: of)?|few|\d{1,2})\s*"
+        r"(day|days|business day|business days|working day|working days)\b"
+        r"|(\d{1,2}|do|teen|char|दो|दोन|तीन|एक)\s*(?:din|दिन|दिवस|दिवसांत|days?)\s*(?:mein|me|में|मध्ये|madhe)?\b",
+        lowered,
+    )
+    if rel:
+        token = (rel.group(1) or rel.group(3) or "").strip()
+        n = _word_num.get(token)
+        if n is None:
+            try:
+                n = int(token)
+            except (TypeError, ValueError):
+                n = None
+        if n is not None and 1 <= n <= 10:
+            label = "tomorrow" if n == 1 else f"in {n} days"
+            return (label, now + timedelta(days=n))
+
     match = re.search(
         r"\b(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+([a-zA-Z]+)(?:\s+(\d{2,4}))?\b",
         lowered,
@@ -2562,7 +2589,26 @@ def promise_date_is_within_window(target: datetime | None, business_days_limit: 
     if not target:
         return False
     now = datetime.now(UTC)
+    # Must be in the future, within the business-day limit, AND land on a working
+    # day. A promise "by Saturday" is not a valid collections commitment — a date
+    # that resolves to a weekend gets pushed back so the agent asks for a closer,
+    # working-day date instead of silently accepting it.
+    if target.date() <= now.date():
+        return False
+    if target.weekday() >= 5:  # Sat/Sun
+        return False
     return count_business_days(now, target) <= int(business_days_limit)
+
+
+def promise_display_date(target: datetime | None, raw_date: str) -> str:
+    """A clean human phrase for the promised date. Relative labels like
+    'in 3 days' or 'in 2 days' read wrong inside 'released by {x}', so render a
+    concrete weekday+date ('Friday, 12 June'). 'today'/'tomorrow' read fine as-is."""
+    if raw_date in ("today", "tomorrow"):
+        return raw_date
+    if target:
+        return target.strftime("%A, %-d %B") if os.name != "nt" else target.strftime("%A, %#d %B")
+    return raw_date
 
 
 def invoice_mentioned_in_text(text: str, invoices: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -2586,7 +2632,9 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
         # is_affirmative so "Auntie is speaking but I'm in a meeting, call me in
         # 5 minutes" is handled as a callback request, not a yes to proceed.
         "call_back_later": bool(re.search(
-            r"(?:\b(?:call (?:me )?(?:back|later|after)|call me in|in a meeting|i.?m busy|i am busy|busy right now|not a good time|can you call|reschedule|ring me later|later please)\b"
+            r"(?:\b(?:call(?:ed|s)? (?:me )?(?:back|later|after)|(?:can|could|will) you call|can you (?:please )?call|"
+            r"call me in|ring me|give me a call|reach (?:out|me) later|"
+            r"in a meeting|i.?m busy|i am busy|busy right now|not a good time|reschedule|ring me later|later please)\b"
             r"|बाद में (?:कॉल|फोन|बात)|मीटिंग में|अभी busy|व्यस्त|बाद में call|थोड़ी देर बाद|मीटिंग चल रही|नंतर (?:कॉल|फोन)|मी busy|मीटिंग मध्ये|পরে (?:কল|ফোন)|মিটিং)",
             lowered,
         )),
@@ -2603,7 +2651,11 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
             lowered,
         )),
         "invoice_copy": bool(re.search(
-            r"(?:\b(?:invoice copy|send.*invoice|resend.*invoice|not received|didn.t receive|haven.t received|don.t have the invoice)\b|इनवॉइस नहीं मिला|इनवॉइस भेज|कॉपी भेज)",
+            r"(?:\b(?:invoice copy|send.*invoice|resend.*invoice|not received|didn.t receive|haven.t received|don.t have the invoice"
+            r"|email (?:me|it|them|the details|us)|mail (?:me|it|the details)|send (?:me|it|them|the details|everything|all)|share.*(?:email|on mail))\b"
+            r"|इनवॉइस नहीं मिला|इनवॉइस भेज|कॉपी भेज|ईमेल कर|email कर|mail कर|भेज दो|भेज दीजिए|send कर"
+            # Marathi: "email कर", "पाठवून दे", "मेल कर"
+            r"|पाठवून|पाठवा|मेल कर|ईमेलवर|email वर)",
             lowered,
         )),
         "resolved_issues": bool(re.search(
@@ -2666,7 +2718,15 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
             lowered,
         )),
         "will_pay": bool(re.search(
-            r"(?:\b(?:i will pay|we will pay|i can pay|we can pay|i.ll pay|we.ll pay|payment (?:will be|can be) released|arrange payment|release payment|pay soon|payment soon)\b|pay kar dunga|pay kar denge|payment kar dunga|payment kar denge|payment release kar dunga|payment release kar denge|कर दूंगा|कर देंगे|पेमेंट कर दूंगा|पेमेंट कर देंगे|भुगतान कर दूंगा|भुगतान कर देंगे)",
+            r"(?:\b(?:i will pay|we will pay|i can pay|we can pay|i.ll pay|we.ll pay|"
+            r"(?:i|we)(?:.ll| will| can)? (?:make|do|clear|settle|release|process|complete) (?:the )?payment|"
+            r"make (?:the |a )?payment|clear (?:the )?(?:dues|invoices?|payment|amount|outstanding)|"
+            r"payment (?:by|in|within|on|before|tomorrow|today)|pay (?:by|in|within|on|before)|"
+            r"settle (?:the )?(?:dues|invoices?|amount|outstanding|bill)|"
+            r"payment (?:will be|can be) released|arrange payment|release payment|pay soon|payment soon)\b"
+            r"|pay kar dunga|pay kar denge|payment kar dunga|payment kar denge|payment release kar dunga|payment release kar denge|"
+            r"कर दूंगा|कर दूँगा|कर देंगे|पेमेंट कर दूंगा|पेमेंट कर दूँगा|पेमेंट कर देंगे|भुगतान कर दूंगा|भुगतान कर दूँगा|भुगतान कर देंगे|"
+            r"payment karto|payment karen|bharto|bharen|भरतो|भरेन)",
             lowered,
         )),
         "refusal": bool(re.search(
@@ -2675,6 +2735,14 @@ def analyze_customer_turn(text: str) -> dict[str, Any]:
         )),
         "human_request": bool(re.search(
             r"(?:\b(?:human|live agent|representative|collections executive|real person|talk to (?:a )?person)\b|किसी इंसान|real person|कलेक्शंस executive)",
+            lowered,
+        )),
+        # Explicit "connect me NOW / transfer me / put me through" -> live transfer,
+        # distinct from just asking for the manager's contact details.
+        "transfer_now": bool(re.search(
+            r"(?:\b(?:connect me|transfer me|put me through|patch me through|connect (?:me )?to (?:your |the )?(?:manager|supervisor|executive)|"
+            r"(?:talk|speak) to (?:your |the )?(?:manager|supervisor|executive) now|line par lao|connect kar do)\b"
+            r"|connect कर दो|transfer कर|अभी connect|manager से (?:अभी )?बात करा|आत्ता connect|आत्ता बोलून दे)",
             lowered,
         )),
         "safety": bool(re.search(r"(?:\b(?:kill myself|suicide|not safe|enemy|tried to kill|hurt myself)\b|आत्महत्या)", lowered)),
@@ -2757,6 +2825,7 @@ FAST_DETERMINISTIC_SIGNAL_NAMES = {
     "discount",
     "human_request",
     "agent_contact_request",
+    "transfer_now",
     "refusal",
     "call_back_later",
 }
@@ -2869,9 +2938,44 @@ def generate_collections_reply(
             DETERMINISTIC_CHAT_MODEL,
         )
 
+    prior_assistant = next(
+        (e.get("text", "") for e in reversed(entries) if e.get("role") == "assistant"), ""
+    )
+    offered_manager = "collections executive" in prior_assistant.lower() and (
+        "call you" in prior_assistant.lower() or "reach out" in prior_assistant.lower()
+        or "call karenge" in prior_assistant.lower() or "call कराल" in prior_assistant.lower()
+    )
+
     # Customer is busy / asked to be called back. Acknowledge and offer to
     # reschedule rather than pushing collections. Do NOT treat as affirmative.
-    if signals["call_back_later"]:
+    # Skip when we just offered the manager — that "call me back" is about the
+    # MANAGER calling, handled by the manager-handoff branch below.
+    if signals["call_back_later"] and not offered_manager:
+        # If the customer ALREADY named a callback time ("call me back in 2 hours",
+        # "at 3pm", "tomorrow"), don't re-ask "when?" — acknowledge it and let the
+        # terminal-outcome layer wrap up with the callback parting line. Only ask
+        # "when?" when no time was supplied.
+        if customer_gave_callback_time(customer_text):
+            # Record the callback so the wrap-up summary captures a concrete
+            # follow-up time instead of "no commitment".
+            cb_args = {
+                "account_number": account_number,
+                "callback_time": callback_time_phrase(customer_text),
+                "requested_by": "customer",
+                "notes": customer_text,
+            }
+            cb_result = run_tool("log_callback_request", cb_args)
+            tool_calls.append(build_tool_call_entry("log_callback_request", cb_args, cb_result))
+            ack = {
+                "english": "Sure, no problem. I'll call you back then about the pending DHL invoices.",
+                "hinglish": "Theek hai, koi baat nahi. Main aapko us time pending DHL invoices ke liye dobara call kar loonga.",
+                "hindi": "ठीक है, कोई बात नहीं। मैं आपको उस समय pending DHL invoices के लिए दोबारा call कर लूँगा।",
+                "marathi": "ठीक आहे, काही हरकत नाही. मी तुम्हाला त्या वेळी pending DHL invoices साठी परत call करतो.",
+                "bengali": "ঠিক আছে, কোনো সমস্যা নেই। আমি আপনাকে সেই সময় pending DHL invoices-এর জন্য আবার call করব।",
+                "tamil": "சரி, பரவாயில்லை. நான் அந்த நேரத்தில் pending DHL invoices பற்றி உங்களை மீண்டும் call செய்கிறேன்.",
+            }
+            message = ack.get(language_id, ack["english"])
+            return (message, tool_calls, DETERMINISTIC_CHAT_MODEL)
         callback = {
             "english": "No problem, I won't take much of your time. When would be a good time to call you back about the pending DHL invoices?",
             "hinglish": "Koi baat nahi, main aapka zyada time nahi loonga. Pending DHL invoices ke liye main aapko dobara kab call karoon, jo aapke liye theek ho?",
@@ -2883,21 +2987,82 @@ def generate_collections_reply(
         message = callback.get(language_id, callback["english"])
         return (message, tool_calls, DETERMINISTIC_CHAT_MODEL)
 
+    # Explicit "connect me NOW / transfer me" -> live transfer to the executive.
+    if signals.get("transfer_now"):
+        h = customer.get("human_transfer") or HUMAN_AGENT
+        args = {"reason": "Customer requested an immediate transfer to a human collections executive.", "customer_summary": customer_text}
+        result = run_tool("transfer_to_human", args)
+        tool_calls.append(build_tool_call_entry("transfer_to_human", args, result))
+        name = str(h.get("name", HUMAN_AGENT["name"]))
+        connect = {
+            "english": f"Sure, connecting you to {name}, our Collections Executive, right now. Please stay on the line.",
+            "hinglish": f"Bilkul, main aapko abhi {name}, hamari Collections Executive, se connect kar raha hoon. Please line par baney rahiye.",
+            "hindi": f"बिल्कुल, मैं आपको अभी {name}, हमारी Collections Executive, से connect कर रहा हूँ. कृपया line पर बने रहिए.",
+            "marathi": f"नक्कीच, मी तुम्हाला आत्ता {name}, आमच्या Collections Executive, शी connect करतो. कृपया line वर रहा.",
+            "bengali": f"অবশ্যই, আমি এখনই আপনাকে {name}, আমাদের Collections Executive-এর সাথে connect করছি. অনুগ্রহ করে line-এ থাকুন.",
+            "tamil": f"கண்டிப்பாக, இப்போதே உங்களை {name}, எங்கள் Collections Executive-உடன் connect செய்கிறேன். தயவுசெய்து line-ல் இருங்கள்.",
+        }
+        return (connect.get(language_id, connect["english"]), tool_calls, DETERMINISTIC_CHAT_MODEL)
+
+    # Manager handoff RESOLUTION: the prior turn offered the manager and asked
+    # "should she call you, or will you reach out?". Handle the customer's answer.
+    if offered_manager:
+        h = customer.get("human_transfer") or HUMAN_AGENT
+        name = str(h.get("name", HUMAN_AGENT["name"]))
+        wants_callback = bool(signals.get("call_back_later")) or re.search(
+            r"\b(?:call me|she (?:can )?call|have her call|callback|call back|कॉल कर|बुलाव|फोन कर|she will call)\b",
+            customer_text.lower(),
+        )
+        if wants_callback:
+            args = {"reason": f"Customer asked {name} (Collections Executive) to call them back.", "customer_summary": customer_text}
+            result = run_tool("transfer_to_human", args)
+            tool_calls.append(build_tool_call_entry("transfer_to_human", args, result))
+            # Capture the requested callback time (if any) so the wrap-up records a
+            # concrete manager follow-up, not just "handoff".
+            if customer_gave_callback_time(customer_text):
+                cb_args = {
+                    "account_number": account_number,
+                    "callback_time": callback_time_phrase(customer_text),
+                    "requested_by": "manager",
+                    "notes": customer_text,
+                }
+                cb_result = run_tool("log_callback_request", cb_args)
+                tool_calls.append(build_tool_call_entry("log_callback_request", cb_args, cb_result))
+            ack = {
+                "english": f"No problem, I'll ask {name} to call you back.",
+                "hinglish": f"Koi baat nahi, main {name} ko aapko call back karne ke liye keh dunga.",
+                "hindi": f"कोई बात नहीं, मैं {name} को आपको call back करने के लिए कह दूँगा.",
+                "marathi": f"काही हरकत नाही, मी {name} ना तुम्हाला call back करायला सांगतो.",
+                "bengali": f"কোনো সমস্যা নেই, আমি {name}-কে আপনাকে call back করতে বলব.",
+                "tamil": f"பரவாயில்லை, {name}-ஐ உங்களை call back செய்யச் சொல்கிறேன்.",
+            }
+            return (ack.get(language_id, ack["english"]), tool_calls, DETERMINISTIC_CHAT_MODEL)
+        # Customer will reach out themselves -> just acknowledge.
+        ack2 = {
+            "english": "Perfect, please feel free to reach out to her directly.",
+            "hinglish": "Theek hai, aap unhe direct call kar sakte hain.",
+            "hindi": "ठीक है, आप उन्हें direct call कर सकते हैं.",
+            "marathi": "ठीक आहे, तुम्ही त्यांना direct call करू शकता.",
+            "bengali": "ঠিক আছে, আপনি তাঁকে সরাসরি call করতে পারেন.",
+            "tamil": "சரி, நீங்கள் அவரை நேரடியாக call செய்யலாம்.",
+        }
+        return (ack2.get(language_id, ack2["english"]), tool_calls, DETERMINISTIC_CHAT_MODEL)
+
     # Customer asked for the human agent / manager name + contact. Answer with the
     # details directly — do NOT recap invoices and do NOT trigger a transfer.
     # Checked before the invoice/details branches so "manager ka naam aur contact
     # details bata dijiye" never falls through to an invoice recap.
-    if signals["agent_contact_request"]:
+    if signals["agent_contact_request"] and not offered_manager:
         transfer = customer.get("human_transfer") or HUMAN_AGENT
         agent_name = str(transfer.get("name", HUMAN_AGENT["name"]))
         agent_phone = str(transfer.get("phone", HUMAN_AGENT["phone"]))
         contact = {
-            "english": f"Of course. My manager is {agent_name}, our Collections Executive, and the contact number is {agent_phone}. You can reach out on this number directly.",
-            "hinglish": f"Ji bilkul. Mere manager ka naam {agent_name} hai, woh hamari Collections Executive hain, aur unka contact number {agent_phone} hai. Aap is number par direct call kar sakte hain.",
-            "hindi": f"जी बिल्कुल. मेरे manager का नाम {agent_name} है, वे हमारी Collections Executive हैं, और उनका contact number {agent_phone} है. आप इस number पर direct call कर सकते हैं.",
-            "marathi": f"हो नक्कीच. माझ्या manager चं नाव {agent_name} आहे, त्या आमच्या Collections Executive आहेत, आणि त्यांचा contact number {agent_phone} आहे. तुम्ही या number वर direct call करू शकता.",
-            "bengali": f"অবশ্যই। আমার manager-এর নাম {agent_name}, তিনি আমাদের Collections Executive, এবং তাঁর contact number {agent_phone}. আপনি এই number-এ সরাসরি call করতে পারেন।",
-            "tamil": f"கண்டிப்பாக. என் manager பெயர் {agent_name}, அவர் எங்கள் Collections Executive, அவரது contact number {agent_phone}. இந்த number-க்கு நேரடியாக call செய்யலாம்.",
+            "english": f"Of course. My manager is {agent_name}, our Collections Executive, and the contact number is {agent_phone}. Would you like me to have her call you at a convenient time, or will you reach out to her directly?",
+            "hinglish": f"Ji bilkul. Mere manager ka naam {agent_name} hai, woh hamari Collections Executive hain, aur unka contact number {agent_phone} hai. Kya main unse aapko call karwa doon kisi convenient time par, ya aap khud unhe call karenge?",
+            "hindi": f"जी बिल्कुल. मेरी manager का नाम {agent_name} है, वे हमारी Collections Executive हैं, और उनका contact number {agent_phone} है. क्या मैं उनसे आपको किसी convenient time पर call करवा दूँ, या आप खुद उन्हें call करेंगे?",
+            "marathi": f"हो नक्कीच. माझ्या manager चं नाव {agent_name} आहे, त्या आमच्या Collections Executive आहेत, आणि त्यांचा contact number {agent_phone} आहे. मी त्यांना तुम्हाला सोयीच्या वेळी call करायला सांगू का, की तुम्ही स्वतः त्यांना call कराल?",
+            "bengali": f"অবশ্যই। আমার manager-এর নাম {agent_name}, তিনি আমাদের Collections Executive, এবং তাঁর contact number {agent_phone}. আমি কি তাঁকে দিয়ে আপনাকে সুবিধাজনক সময়ে call করাব, নাকি আপনি নিজেই তাঁকে call করবেন?",
+            "tamil": f"கண்டிப்பாக. என் manager பெயர் {agent_name}, அவர் எங்கள் Collections Executive, அவரது contact number {agent_phone}. வசதியான நேரத்தில் அவரை உங்களை call செய்யச் சொல்லட்டுமா, அல்லது நீங்களே அவரை call செய்வீர்களா?",
         }
         return (contact.get(language_id, contact["english"]), tool_calls, DETERMINISTIC_CHAT_MODEL)
 
@@ -2930,7 +3095,7 @@ def generate_collections_reply(
         for k in (
             "already_paid", "dispute", "resolved_issues", "invoice_copy", "cash_flow",
             "approval_pending", "will_pay", "asks_timeline", "discount", "payment_options",
-            "agent_contact_request", "call_back_later", "refusal", "human_request", "safety",
+            "agent_contact_request", "transfer_now", "call_back_later", "refusal", "human_request", "safety",
             "overdue_days_query", "amount_query",
         )
     )
@@ -3029,7 +3194,17 @@ def generate_collections_reply(
             DETERMINISTIC_CHAT_MODEL,
         )
 
-    if signals["count_invoices"] or signals["which_invoice"] or signals["amount_query"] or signals["details"]:
+    # Full invoice recap. The broad "details" signal must YIELD to a more specific
+    # actionable intent (email/resend, already-paid, dispute, etc.) — "email me the
+    # details" means resend, not recite every invoice. Those branches come later,
+    # so suppress the recap when such a signal is also present.
+    _yields_to = (
+        signals.get("invoice_copy") or signals.get("already_paid") or signals.get("dispute")
+        or signals.get("resolved_issues") or signals.get("agent_contact_request")
+        or signals.get("payment_options") or signals.get("will_pay") or signals.get("cash_flow")
+        or signals.get("approval_pending") or signals.get("discount")
+    )
+    if (signals["count_invoices"] or signals["which_invoice"] or signals["amount_query"] or signals["details"]) and not _yields_to:
         tool_calls.extend(ensure_invoice_tool(prior_tool_calls, account_number))
         lines = " ".join(invoice_summary_line(inv, language_id) for inv in invoices)
         total = total_summary_text(customer, invoices, language_id)
@@ -3141,22 +3316,23 @@ def generate_collections_reply(
             result = run_tool("log_promise_to_pay", args)
             tool_calls.append(build_tool_call_entry("log_promise_to_pay", args, result))
             recap = payment_options_text(language_id)
+            disp = promise_display_date(parsed_date, raw_date)
             if language_id == "hindi":
                 return (
-                    f"ठीक है, मैंने note कर लिया है कि payment {raw_date} तक release होगी. "
+                    f"ठीक है, मैंने note कर लिया है कि payment {disp} तक release होगी. "
                     f"Please उस date तक payment clear कर दीजिए. {recap}",
                     tool_calls,
                     DETERMINISTIC_CHAT_MODEL,
                 )
             if language_id == "hinglish":
                 return (
-                    f"Theek hai, maine note kar liya hai ki payment {raw_date} tak release hogi. "
+                    f"Theek hai, maine note kar liya hai ki payment {disp} tak release hogi. "
                     f"Please us date tak payment clear kar dijiye. {recap}",
                     tool_calls,
                     DETERMINISTIC_CHAT_MODEL,
                 )
             return (
-                f"Thank you. I have noted that payment will be released by {raw_date}. "
+                f"Thank you. I have noted that payment will be released by {disp}. "
                 f"Please ensure it is made by then. {recap}",
                 tool_calls,
                 DETERMINISTIC_CHAT_MODEL,
@@ -3505,6 +3681,8 @@ def deterministic_call_summary(payload: dict[str, Any]) -> dict[str, Any]:
     disposition = "no-outcome"
     if latest_tool_call(tool_calls, "log_promise_to_pay"):
         disposition = "promise-to-pay"
+    elif latest_tool_call(tool_calls, "log_callback_request"):
+        disposition = "callback-scheduled"
     elif latest_tool_call(tool_calls, "log_already_paid"):
         disposition = "already-paid"
     elif latest_tool_call(tool_calls, "resend_invoice"):
@@ -3528,6 +3706,19 @@ def deterministic_call_summary(payload: dict[str, Any]) -> dict[str, Any]:
         promise_date = ptp_call.get("result", {}).get("promise_date") or ptp_call.get("args", {}).get("promise_date")
         agreements.append(f"Customer committed to make payment by {promise_date}.")
         key_decisions.append(f"Promise-to-pay date recorded for {promise_date}.")
+    cb_call = latest_tool_call(tool_calls, "log_callback_request")
+    if cb_call:
+        cb_time = (cb_call.get("args", {}).get("callback_time")
+                   or cb_call.get("result", {}).get("callback_time") or "the agreed time")
+        by_whom = (cb_call.get("args", {}).get("requested_by") or "customer")
+        if str(by_whom) == "manager":
+            agreements.append(f"Collections Executive to call the customer back {cb_time}.")
+            follow_ups.append(f"Collections Executive should call the customer {cb_time}.")
+            key_decisions.append(f"Manager callback arranged for {cb_time}.")
+        else:
+            agreements.append(f"Customer asked to be called back {cb_time}.")
+            follow_ups.append(f"Collections team should call the customer back {cb_time}.")
+            key_decisions.append(f"Callback scheduled for {cb_time}.")
     if latest_tool_call(tool_calls, "resend_invoice"):
         agent_commitments.append("Agent triggered an invoice resend to the registered email address.")
         follow_ups.append("Customer should review the resent invoice and arrange payment.")
@@ -3604,6 +3795,7 @@ def deterministic_call_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
     headline_map = {
         "promise-to-pay": f"{customer.get('company_name', 'Customer')} committed to a payment date",
+        "callback-scheduled": "Customer requested a callback at a specific time",
         "already-paid": "Customer claimed payment was already made",
         "invoice-resend": "Invoice resend was triggered and payment follow-up remains open",
         "dispute": "Customer raised a dispute that needs team follow-up",
@@ -4557,6 +4749,7 @@ def create_language_coach_review(
 
 LLM_TURN_TOOLS = {
     "log_promise_to_pay",
+    "log_callback_request",
     "log_already_paid",
     "resend_invoice",
     "log_dispute",
@@ -5197,6 +5390,19 @@ def tool_log_promise_to_pay(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def tool_log_callback_request(payload: dict[str, Any]) -> dict[str, Any]:
+    callback_id = f"cb_{uuid.uuid4().hex[:8]}"
+    return {
+        "ok": True,
+        "callback_id": callback_id,
+        "account_number": payload.get("account_number", DEFAULT_ACCOUNT_ID),
+        "callback_time": payload.get("callback_time", ""),
+        "requested_by": payload.get("requested_by", "customer"),
+        "notes": payload.get("notes", ""),
+        "message": "Callback scheduled. Collections will follow up at the requested time.",
+    }
+
+
 def tool_log_already_paid(payload: dict[str, Any]) -> dict[str, Any]:
     verification_task_id = f"verify_{uuid.uuid4().hex[:8]}"
     return {
@@ -5259,6 +5465,7 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "get_customer": tool_get_customer,
     "get_invoices": tool_get_invoices,
     "log_promise_to_pay": tool_log_promise_to_pay,
+    "log_callback_request": tool_log_callback_request,
     "log_already_paid": tool_log_already_paid,
     "resend_invoice": tool_resend_invoice,
     "log_dispute": tool_log_dispute,
@@ -6464,6 +6671,9 @@ class PhoneCallSession:
         self._flush_sent_for_current_pause = False
         self._event_log: deque[dict[str, Any]] = deque(maxlen=80)
         self._finalized = False
+        # Set to a terminal-outcome key when the current utterance is the agent's
+        # parting line; the call is ended once that utterance finishes playing.
+        self._pending_finish_reason: str | None = None
         self._greeting_started = False
         self._ambience_cursor_bytes = 0
         self._ambience_thread: threading.Thread | None = None
@@ -6743,11 +6953,46 @@ class PhoneCallSession:
             self._current_response_text = None
             self._last_agent_speak_start_at = None
             self.turn_number += 1
+            finish_reason = self._pending_finish_reason
+            self._pending_finish_reason = None
         self.log_event("playback_completed", {"source": source})
+        # Terminal parting line just finished -> wrap up the call.
+        if finish_reason:
+            self.log_event("auto_end_call", {"reason": finish_reason})
+            threading.Thread(
+                target=self._end_call_after_parting, args=(finish_reason,), daemon=True
+            ).start()
+            return True
         self._start_ambience_loop()
         self._emit_idle_ambience_once()
         threading.Thread(target=self._run_supervisor_review, daemon=True).start()
         return True
+
+    def _end_call_after_parting(self, reason: str) -> None:
+        # Small grace so the last audio frames fully drain to Exotel before we
+        # tear down, then hang up the PSTN leg and finalize the session.
+        time.sleep(0.6)
+        try:
+            self._hangup_exotel_call()
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("hangup_error", {"message": str(exc)[:200]})
+        self.finish(f"completed_{reason}")
+
+    def _hangup_exotel_call(self) -> None:
+        """Ask Exotel to hang up the live call leg. Best-effort; the session is
+        finalized regardless so the demo always wraps up cleanly."""
+        call_sid = (self.call_sid or "").strip()
+        if not call_sid or not exotel_enabled():
+            return
+        try:
+            requests.post(
+                f"{EXOTEL_API_BASE_URL}/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/{call_sid}.json",
+                headers={"Authorization": exotel_basic_auth_header()},
+                data={"Status": "completed"},
+                timeout=15,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("hangup_error", {"message": str(exc)[:200]})
 
     def _handle_language_detection(
         self,
@@ -7420,7 +7665,20 @@ class PhoneCallSession:
 
         self._apply_tool_calls(tool_calls)
         if text and text.strip():
-            self._speak_reply(text, tone=collections_reply_tone(text, tool_calls))
+            # Terminal outcome? Append a short parting line to the reply and speak
+            # it as ONE utterance, then hang up once that utterance finishes.
+            outcome = terminal_call_outcome(
+                text, tool_calls, analyze_customer_turn(transcript_text or ""),
+                transcript_text or "", last_assistant_text(self._message_history()),
+            )
+            spoken = text
+            if outcome:
+                parting = parting_message(outcome, self.active_language_id, customer_display_name(self.customer or {}))
+                if parting:
+                    spoken = f"{text.rstrip()} {parting}"
+                    with self._lock:
+                        self._pending_finish_reason = outcome
+            self._speak_reply(spoken, tone=collections_reply_tone(text, tool_calls))
 
     def _apply_tool_calls(self, calls: list[dict[str, Any]]) -> None:
         if not calls:
@@ -7695,6 +7953,182 @@ def collections_reply_tone(assistant_text: str, tool_calls: list[dict[str, Any]]
     return "professional"
 
 
+# Parting lines spoken right before the agent hangs up, per terminal outcome and
+# language. Kept short and warm — a clean professional close.
+_PARTING_MESSAGES: dict[str, dict[str, str]] = {
+    # NOTE: the reply itself already confirms "I've noted the payment date" — the
+    # parting must NOT repeat that. Just a warm sign-off.
+    "promise": {
+        "english": "Thank you for your time, {name}. Have a good day, goodbye.",
+        "hinglish": "Aapke time ke liye dhanyavaad, {name}. Aapka din shubh ho, goodbye.",
+        "hindi": "आपके समय के लिए धन्यवाद, {name}. आपका दिन शुभ हो, goodbye.",
+        "marathi": "तुमच्या वेळेबद्दल धन्यवाद, {name}. तुमचा दिवस चांगला जावो, goodbye.",
+        "bengali": "আপনার সময়ের জন্য ধন্যবাদ, {name}. ভালো থাকবেন, goodbye.",
+        "tamil": "உங்கள் நேரத்திற்கு நன்றி, {name}. நல்ல நாள், goodbye.",
+    },
+    # NOTE: the reply already says "I'll call you back then" — the parting must NOT
+    # repeat it. Just a warm sign-off.
+    "callback": {
+        "english": "Thank you for your time, {name}. Have a good day, goodbye.",
+        "hinglish": "Aapke time ke liye dhanyavaad, {name}. Aapka din shubh ho, goodbye.",
+        "hindi": "आपके समय के लिए धन्यवाद, {name}. आपका दिन शुभ हो, goodbye.",
+        "marathi": "तुमच्या वेळेबद्दल धन्यवाद, {name}. तुमचा दिवस चांगला जावो, goodbye.",
+        "bengali": "আপনার সময়ের জন্য ধন্যবাদ, {name}. ভালো থাকবেন, goodbye.",
+        "tamil": "உங்கள் நேரத்திற்கு நன்றி, {name}. நல்ல நாள், goodbye.",
+    },
+    "transfer": {
+        "english": "Thank you, {name}. I'm connecting you to our collections executive now. Please stay on the line, goodbye.",
+        "hinglish": "Thank you, {name}. Main aapko hamari collections executive se connect kar raha hoon. Please line par baney rahiye, goodbye.",
+        "hindi": "धन्यवाद, {name}. मैं आपको हमारी collections executive से connect कर रहा हूँ. कृपया line पर बने रहिए, goodbye.",
+        "marathi": "धन्यवाद, {name}. मी तुम्हाला आमच्या collections executive शी connect करतो. कृपया line वर रहा, goodbye.",
+        "bengali": "ধন্যবাদ, {name}. আমি আপনাকে আমাদের collections executive-এর সাথে connect করছি. অনুগ্রহ করে line-এ থাকুন, goodbye.",
+        "tamil": "நன்றி, {name}. நான் உங்களை எங்கள் collections executive-உடன் connect செய்கிறேன். தயவுசெய்து line-ல் இருங்கள், goodbye.",
+    },
+    # NOTE: the reply already confirms the manager will call back / notes it — the
+    # parting must NOT repeat "I'll make a note". Just a warm sign-off.
+    "manager_handoff": {
+        "english": "Thank you for your time, {name}. Have a good day, goodbye.",
+        "hinglish": "Aapke time ke liye dhanyavaad, {name}. Aapka din shubh ho, goodbye.",
+        "hindi": "आपके समय के लिए धन्यवाद, {name}. आपका दिन शुभ हो, goodbye.",
+        "marathi": "तुमच्या वेळेबद्दल धन्यवाद, {name}. तुमचा दिवस चांगला जावो, goodbye.",
+        "bengali": "আপনার সময়ের জন্য ধন্যবাদ, {name}. ভালো থাকবেন, goodbye.",
+        "tamil": "உங்கள் நேரத்திற்கு நன்றி, {name}. நல்ல நாள், goodbye.",
+    },
+    "wrong_contact": {
+        "english": "No problem, thank you for your time. We'll reach the right person separately. Have a good day, goodbye.",
+        "hinglish": "Koi baat nahi, aapke time ke liye dhanyavaad. Hum sahi person tak alag se pahunch jayenge. Aapka din shubh ho, goodbye.",
+        "hindi": "कोई बात नहीं, आपके समय के लिए धन्यवाद. हम सही person तक अलग से पहुँच जाएँगे. आपका दिन शुभ हो, goodbye.",
+        "marathi": "काही हरकत नाही, तुमच्या वेळेबद्दल धन्यवाद. आम्ही योग्य व्यक्तीपर्यंत वेगळ्या मार्गाने पोहोचू. तुमचा दिवस चांगला जावो, goodbye.",
+        "bengali": "কোনো সমস্যা নেই, আপনার সময়ের জন্য ধন্যবাদ. আমরা সঠিক ব্যক্তির কাছে আলাদাভাবে পৌঁছাব. ভালো থাকবেন, goodbye.",
+        "tamil": "பரவாயில்லை, உங்கள் நேரத்திற்கு நன்றி. சரியான நபரை தனியாக தொடர்புகொள்வோம். நல்ல நாள், goodbye.",
+    },
+}
+
+
+def customer_gave_callback_time(customer_text: str) -> bool:
+    """True when the customer named a callback time — absolute ("3pm", "tomorrow"),
+    RELATIVE ("in 2 hours", "in two hours", "after lunch", "later today"), a
+    day-part, a weekday, or "next week". Covers EN + Hindi/Hinglish/Marathi."""
+    low = (customer_text or "").lower()
+    if not low.strip():
+        return False
+    raw_date, _ = parse_customer_date(customer_text or "")
+    if raw_date:
+        return True
+    # A number/word quantity, optionally a RANGE ("2 to 3", "2-3", "two or three",
+    # "a day or two"), then a time unit. Quantity also covers "a/an/couple/few/half".
+    _qty = r"(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|half|couple(?: of)?|few|\d{1,2})"
+    _range = r"(?:\s*(?:to|or|\-|–|—|and)\s*" + _qty + r")?"
+    _unit = r"(?:hour|hours|hr|hrs|min|mins|minute|minutes|day|days|week|weeks)"
+    return bool(
+        re.search(
+            # absolute clock / day-parts / weekdays
+            r"\b(?:\d{1,2}\s*(?:am|pm|o.?clock|baje|वाजता|बजे)|morning|afternoon|evening|noon|tonight|"
+            r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+            r"next week|next month|next (?:couple|few)|later (?:today|this|tonight|in the)|after (?:lunch|some time|a while|sometime)|"
+            # RELATIVE durations + ranges: "in 2 hours", "in two to three days", "in 2-3 hrs",
+            # "in the next couple of hours", "a day or two", "after 2 hours"
+            r"(?:in|after|within)\s+(?:the\s+)?(?:next\s+)?" + _qty + _range + r"\s*(?:an?\s+)?" + _unit +
+            # bare range like "a day or two" (no leading in/after)
+            r"|(?:a\s+(?:day|hour|week)\s+or\s+(?:two|three|few))"
+            # romanized Hindi/Marathi relative durations: "do ghante baad/mein", "thodi der baad", "tasaat"
+            r"|(?:ghante|ghanta|ghante?)\s*(?:baad|mein|me)|thodi der|thoda wait|tasaat|tasanantar|thodya vela)\b"
+            r"|सुबह|शाम|दोपहर|कल|परसों|घंटे? बाद|घंटे? में|मिनट बाद|थोड़ी देर|बाद में|अगले हफ्ते|"
+            r"सकाळी|दुपारी|संध्याकाळी|तासा(?:त|नंतर)|उद्या|नंतर|थोड्या वेळाने|पुढच्या आठवड्यात",
+            low,
+        )
+    )
+
+
+def callback_time_phrase(customer_text: str) -> str:
+    """Extract the spoken callback timeframe for logging — "tomorrow", "next week",
+    "in two hours", "in 2-3 days", "at 3pm". Falls back to a concrete date from
+    parse_customer_date, else a generic label. English-centric (the log is internal)."""
+    low = normalize_whitespace(customer_text or "").lower()
+    # Concrete date first (today/tomorrow/explicit/relative-window).
+    raw_date, parsed = parse_customer_date(customer_text or "")
+    patterns = [
+        r"(?:in|after|within)\s+(?:the\s+)?(?:next\s+)?(?:a|an|one|two|three|four|five|six|half|couple(?: of)?|few|\d{1,2})"
+        r"(?:\s*(?:to|or|\-|–|and)\s*(?:a|an|one|two|three|four|five|six|half|couple(?: of)?|few|\d{1,2}))?"
+        r"\s*(?:an?\s+)?(?:hours|hour|hrs|hr|minutes|minute|mins|min|days|day|weeks|week)",
+        r"next week|next month|tonight|tomorrow|today|this (?:evening|afternoon|morning)",
+        r"\d{1,2}\s*(?:am|pm|o.?clock)",
+        r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+        r"(?:morning|afternoon|evening|noon)",
+        r"after (?:lunch|some time|a while)",
+        r"a (?:day|hour|week) or (?:two|three|few)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, low)
+        if m:
+            return m.group(0).strip()
+    if raw_date:
+        return raw_date
+    return "as requested"
+
+
+def terminal_call_outcome(
+    assistant_text: str,
+    tool_calls: list[dict[str, Any]],
+    signals: dict[str, Any] | None = None,
+    customer_text: str = "",
+    prior_assistant_text: str = "",
+) -> str | None:
+    """Return a terminal-outcome key ('promise'|'callback'|'transfer') when this
+    turn is a natural wrap-up point and the agent should say a parting line and
+    hang up. None means keep the call going.
+
+    Promise/transfer are tool-call-based (reliable). Callback is terminal ONLY
+    when the CUSTOMER actually supplied a callback time/date this turn — NOT when
+    the agent merely offers to reschedule (the "answered its own question" bug)."""
+    names = {str((tc or {}).get("name") or "") for tc in (tool_calls or [])}
+    if "log_promise_to_pay" in names:
+        return "promise"
+    if "transfer_to_human" in names:
+        # transfer_to_human covers both a LIVE transfer ("connecting you now") and
+        # a manager CALLBACK arrangement ("I'll ask her to call you back"). Pick the
+        # parting that matches what the reply actually said so we don't tell the
+        # customer to "stay on the line" when she's calling later.
+        low = (assistant_text or "").lower()
+        if any(c in low for c in ("call you back", "call back", "call you", "call kar", "call back करने", "call back करायला", "callback")):
+            return "manager_handoff"
+        return "transfer"
+    # Callback: the customer must have given a time in THEIR text. A bare "call me
+    # back" with no time -> keep talking (the agent asks "when?"); only end once
+    # they answer with a day/time.
+    if signals and signals.get("call_back_later"):
+        if customer_gave_callback_time(customer_text or ""):
+            return "callback"
+    # Manager-handoff resolution: the prior agent turn offered the manager and
+    # asked "should she call you, or will you reach out?" — the customer's answer
+    # (either way) wraps up the call.
+    prior = (prior_assistant_text or "").lower()
+    offered_manager = (
+        "collections executive" in prior
+        and ("call you" in prior or "reach out" in prior or "call करवा" in prior
+             or "call कराल" in prior or "call karenge" in prior or "call करायला" in prior)
+    )
+    if offered_manager and customer_text.strip():
+        return "manager_handoff"
+    return None
+
+
+def last_assistant_text(messages: list[dict[str, Any]] | None) -> str:
+    """The most recent assistant message text from a {role,text} message list."""
+    for entry in reversed(messages or []):
+        if isinstance(entry, dict) and str(entry.get("role") or "") == "assistant":
+            return str(entry.get("text") or entry.get("content") or "")
+    return ""
+
+
+def parting_message(outcome: str, language_id: str, customer_name: str = "") -> str:
+    name = (customer_name or "").strip()
+    table = _PARTING_MESSAGES.get(outcome) or _PARTING_MESSAGES["promise"]
+    text = table.get(language_id) or table.get("english") or ""
+    # Use a polite generic if no name; avoid a dangling comma.
+    return text.replace("{name}", name).replace(" , ", " ").replace(", .", ".").replace("  ", " ").strip()
+
+
 @app.post("/api/chat/turn")
 def chat_turn():
     payload = request.get_json(silent=True) or {}
@@ -7732,6 +8166,12 @@ def chat_turn():
         costs = record_chat_agent_usage(CHAT_MODEL, usage)
 
     model_label = CHAT_MODEL if usage_events else DETERMINISTIC_CHAT_MODEL
+    # Decide whether this turn is a natural wrap-up point; if so, supply a short
+    # parting line the client speaks before ending the call.
+    _signals = analyze_customer_turn(transcript_text) if transcript_text else {}
+    _lang = supported_render_language_id((language_advice or {}).get("suggested_language_id") or DEFAULT_LANGUAGE_ID)
+    outcome = terminal_call_outcome(text, tool_calls, _signals, transcript_text or "", last_assistant_text(messages))
+    parting = parting_message(outcome, _lang, customer_display_name(get_customer(account_number) or {})) if outcome else ""
     return success_json(
         {
             "assistant_text": text,
@@ -7739,6 +8179,9 @@ def chat_turn():
             "costs": costs,
             "model": model_label,
             "tone": collections_reply_tone(text, tool_calls),
+            "end_call": bool(outcome),
+            "end_reason": outcome or "",
+            "parting_message": parting,
         }
     )
 
@@ -7791,6 +8234,10 @@ def customer_turn_unified():
         costs = record_chat_agent_usage(CHAT_MODEL, usage)
 
     model_label = CHAT_MODEL if usage_events else DETERMINISTIC_CHAT_MODEL
+    _signals = analyze_customer_turn(transcript_text) if transcript_text else {}
+    _lang = supported_render_language_id((advice or {}).get("suggested_language_id") or DEFAULT_LANGUAGE_ID)
+    outcome = terminal_call_outcome(text, tool_calls, _signals, transcript_text or "", last_assistant_text(messages))
+    parting = parting_message(outcome, _lang, customer_display_name(get_customer(account_number) or {})) if outcome else ""
     return success_json(
         {
             "advice": advice,
@@ -7799,6 +8246,9 @@ def customer_turn_unified():
             "costs": costs,
             "model": model_label,
             "tone": collections_reply_tone(text, tool_calls),
+            "end_call": bool(outcome),
+            "end_reason": outcome or "",
+            "parting_message": parting,
         }
     )
 

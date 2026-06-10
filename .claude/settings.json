@@ -110,7 +110,11 @@
       "Bash(curl -s -X POST -H 'xi-api-key: sk_fb94b34ce103dd0402209614182bb75eb028bc54eadc92fb' -H 'Content-Type: application/json' -d '{\"rules\":[{\"type\":\"alias\",\"string_to_replace\":\"Gressive\",\"alias\":\"Gressihv\"}]}' https://api.elevenlabs.io/v1/pronunciation-dictionaries/F6QAB5Afyd7NaPO4vXlb/add-rules)",
       "Bash(python -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\('new version:',d.get\\('version_id'\\)\\)\")",
       "Bash(awk 'NR>=6406 && NR<=7400' backend/app.py)",
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(awk 'NR>=2954 && NR<=3221 && /signals\\\\[\"details\"\\\\]|signals\\\\[\"why_calling\"\\\\]|signals\\\\[\"count_invoices\"\\\\]|reason_probe_text|total_summary_text/' backend/app.py)",
+      "Bash(awk 'NR>=7340 && NR<=7437' backend/app.py)",
+      "Bash(grep -n '\"agent_contact_request\",$\\\\|\"human_request\",$' backend/app.py)",
+      "Bash(awk -F: '$1>2836 && $1<3270 {print}')"
     ],
     "additionalDirectories": [
       "c:\\Users\\AkashPatil\\.claude\\projects\\c--Users-AkashPatil-DHL-POC\\memory"

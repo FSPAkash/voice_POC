@@ -514,8 +514,10 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(session.turn_number, 1)
 
     def test_busy_customer_gets_callback_offer_not_collections_push(self) -> None:
-        # "I'm in a meeting, call me later" must be handled as a callback request,
-        # not misread as affirmative-to-proceed (the weird-call regression).
+        # "I'm in a meeting, call me after five minutes" names a callback TIME, so it
+        # must be handled as a callback request (acknowledge + log the callback so the
+        # wrap-up records a follow-up time), not misread as affirmative-to-proceed and
+        # not pushed the outstanding total.
         messages = [
             {"role": "assistant", "text": "Good day, am I speaking with Anthony?"},
             {"role": "customer", "text": "I am in a meeting, can you call me after five minutes?"},
@@ -530,6 +532,23 @@ class PolicyEngineTests(unittest.TestCase):
         lowered = text.lower()
         self.assertIn("call you back", lowered)
         self.assertNotIn("57,920", text)  # must not push the outstanding total
+        # A concrete callback time is captured for the follow-up record.
+        self.assertEqual([tc.get("name") for tc in tool_calls], ["log_callback_request"])
+
+    def test_busy_customer_without_time_is_asked_when(self) -> None:
+        # No time given -> re-ask "when?", no callback logged yet.
+        messages = [
+            {"role": "assistant", "text": "Good day, am I speaking with Anthony?"},
+            {"role": "customer", "text": "I am busy right now, call me later."},
+        ]
+        text, tool_calls, _ = policy_app.generate_collections_reply(
+            messages,
+            "DHL001",
+            "aditya",
+            {"suggested_language_id": "english"},
+            [],
+        )
+        self.assertIn("when", text.lower())
         self.assertEqual(tool_calls, [])
 
     def test_create_session_reuses_requested_cost_session_id(self) -> None:
