@@ -2501,7 +2501,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                   aria-selected={mode === 'mobile'}
                   className={mode === 'mobile' ? 'mode-switch__btn mode-switch__btn--on' : 'mode-switch__btn'}
                   onClick={() => setMode('mobile')}
-                  disabled={isLive || chatBusy}
+                  disabled={isLive || chatBusy || isClient}
                 >
                   Mobile
                 </button>
@@ -2938,7 +2938,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
             ) : null}
           </section>
 
-          <aside className="side">
+          {!(isClient && mode === 'mobile') && <aside className="side">
             {isClient ? null : (
             <div className="cost-strip cost-strip--side">
               {mode === 'voice' ? (
@@ -3344,7 +3344,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
                 </div>
               </div>
             ) : null}
-          </aside>
+          </aside>}
 
         </main>
       ) : activeTab === 'wrap' ? (
