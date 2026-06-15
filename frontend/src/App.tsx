@@ -2158,7 +2158,7 @@ export default function App({ username, onLogout }: AppProps = {}) {
             : loggedCosts.chat_agent?.total_tokens ?? 0
         await logCall({
           account_number: bootstrapRef.current.account_number,
-          mode: mode === 'mobile' ? 'voice' : mode,
+          mode,
           disposition: dispositionRef.current,
           transcript: transcriptRef.current,
           tool_calls: toolCallsRef.current,

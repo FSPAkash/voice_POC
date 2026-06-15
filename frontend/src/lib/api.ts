@@ -232,7 +232,7 @@ export function customerTurn(body: {
 
 export function logCall(body: {
   account_number: string
-  mode?: 'voice' | 'chat'
+  mode?: 'voice' | 'chat' | 'mobile'
   disposition: string
   transcript: TranscriptEntry[]
   tool_calls: ToolCallEntry[]

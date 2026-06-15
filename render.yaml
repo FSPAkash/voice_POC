@@ -106,3 +106,16 @@ services:
         value: "0"
       - key: RENDER_EXTERNAL_URL
         sync: false
+      # Durable call logging: each completed call is committed as its own JSON
+      # file to the call-logs branch on GitHub (Render's disk is ephemeral).
+      # Set GITHUB_LOG_TOKEN to a fine-grained PAT with contents:write on the
+      # repo. Repo/branch/dir default to FSPAkash/voice_POC / call-logs /
+      # call_logs in code; override here only if they change.
+      - key: GITHUB_LOG_TOKEN
+        sync: false
+      - key: GITHUB_LOG_REPO
+        value: FSPAkash/voice_POC
+      - key: GITHUB_LOG_BRANCH
+        value: call-logs
+      - key: GITHUB_LOG_DIR
+        value: call_logs

@@ -26,7 +26,7 @@ try:
     load_dotenv(Path(__file__).resolve().parent / ".env")
 except ImportError:
     pass
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
 from openai import OpenAI
@@ -467,7 +467,7 @@ def serialize_call_history_entry(entry: dict[str, Any]) -> dict[str, Any]:
     started_at_ms = max(0, ended_at_ms - (duration_sec * 1000))
     costs = entry.get("costs") if isinstance(entry.get("costs"), dict) else {}
     mode = str(entry.get("mode") or "voice").strip().lower()
-    if mode not in {"voice", "chat"}:
+    if mode not in {"voice", "chat", "mobile"}:
         mode = "voice"
 
     mode_cost_usd = entry.get("mode_cost_usd")
@@ -890,6 +890,109 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+# --- Durable call logging to GitHub --------------------------------------
+# Render's filesystem is ephemeral (wiped on every deploy / restart / free-plan
+# idle spin-down), so call_log.jsonl alone does not survive. To keep a permanent
+# record for quality testing we also commit each completed call as its own JSON
+# file to a dedicated branch on GitHub via the Contents API. One file per call
+# means no read-modify-write races between concurrent calls. The push runs in a
+# background thread and is fail-soft: a GitHub outage or missing token never
+# blocks or breaks a live call. Configure with env vars:
+#   GITHUB_LOG_TOKEN   - PAT / fine-grained token with contents:write on the repo
+#   GITHUB_LOG_REPO    - "owner/name" (default: FSPAkash/voice_POC)
+#   GITHUB_LOG_BRANCH  - target branch, does NOT trigger Render deploys
+#                        (default: call-logs)
+#   GITHUB_LOG_DIR     - path prefix inside the repo (default: call_logs)
+GITHUB_LOG_TOKEN = (os.environ.get("GITHUB_LOG_TOKEN", "") or "").strip()
+GITHUB_LOG_REPO = (os.environ.get("GITHUB_LOG_REPO", "") or "FSPAkash/voice_POC").strip()
+GITHUB_LOG_BRANCH = (os.environ.get("GITHUB_LOG_BRANCH", "") or "call-logs").strip()
+GITHUB_LOG_DIR = (os.environ.get("GITHUB_LOG_DIR", "") or "call_logs").strip().strip("/")
+
+
+def github_logging_enabled() -> bool:
+    return bool(GITHUB_LOG_TOKEN and GITHUB_LOG_REPO)
+
+
+def _github_branch_sha(api_base: str, headers: dict[str, str]) -> str | None:
+    """Resolve the target branch tip SHA, creating the branch off the default
+    branch if it does not exist yet. Returns None on failure."""
+    ref = requests.get(
+        f"{api_base}/git/ref/heads/{GITHUB_LOG_BRANCH}", headers=headers, timeout=20
+    )
+    if ref.status_code == 200:
+        return ref.json().get("object", {}).get("sha")
+    if ref.status_code != 404:
+        return None
+    # Branch missing — branch it off the repo's default branch.
+    repo = requests.get(api_base, headers=headers, timeout=20)
+    if not repo.ok:
+        return None
+    default_branch = repo.json().get("default_branch") or "main"
+    base = requests.get(
+        f"{api_base}/git/ref/heads/{default_branch}", headers=headers, timeout=20
+    )
+    if not base.ok:
+        return None
+    base_sha = base.json().get("object", {}).get("sha")
+    if not base_sha:
+        return None
+    created = requests.post(
+        f"{api_base}/git/refs",
+        headers=headers,
+        json={"ref": f"refs/heads/{GITHUB_LOG_BRANCH}", "sha": base_sha},
+        timeout=20,
+    )
+    return base_sha if created.ok else None
+
+
+def _push_call_to_github(entry: dict[str, Any]) -> None:
+    """Commit a single call entry as its own file on the log branch. Fail-soft —
+    logs the outcome to the entry's account but never raises."""
+    try:
+        api_base = f"https://api.github.com/repos/{GITHUB_LOG_REPO}"
+        headers = {
+            "Authorization": f"Bearer {GITHUB_LOG_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if _github_branch_sha(api_base, headers) is None:
+            print(f"[github-log] could not resolve/create branch {GITHUB_LOG_BRANCH}")
+            return
+        ended = str(entry.get("timestamp") or utc_now_iso())
+        day = ended[:10] if len(ended) >= 10 else "undated"
+        call_id = str(entry.get("id") or f"call_{uuid.uuid4().hex[:10]}")
+        mode = str(entry.get("mode") or "voice")
+        path = f"{GITHUB_LOG_DIR}/{day}/{call_id}_{mode}.json"
+        content = base64.b64encode(
+            json.dumps(entry, ensure_ascii=False, indent=2).encode("utf-8")
+        ).decode("ascii")
+        put = requests.put(
+            f"{api_base}/contents/{path}",
+            headers=headers,
+            json={
+                "message": f"call log {call_id} ({mode})",
+                "content": content,
+                "branch": GITHUB_LOG_BRANCH,
+            },
+            timeout=30,
+        )
+        if not put.ok:
+            print(f"[github-log] push failed {put.status_code}: {put.text[:200]}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[github-log] error: {str(exc)[:200]}")
+
+
+def push_call_log_to_github(entry: dict[str, Any]) -> None:
+    """Fire-and-forget durable backup of a completed call to GitHub. No-op when
+    GITHUB_LOG_TOKEN is not configured (e.g. local dev)."""
+    if not github_logging_enabled():
+        return
+    snapshot = deepcopy(entry)
+    threading.Thread(
+        target=_push_call_to_github, args=(snapshot,), daemon=True
+    ).start()
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -7951,7 +8054,7 @@ class PhoneCallSession:
                 entry = {
                     "id": f"call_{uuid.uuid4().hex[:10]}",
                     "account_number": log_payload["account_number"],
-                    "mode": "voice",
+                    "mode": "mobile",
                     "disposition": log_payload["disposition"],
                     "transcript": log_payload["transcript"],
                     "tool_calls": log_payload["tool_calls"],
@@ -7974,6 +8077,7 @@ class PhoneCallSession:
                     "timestamp": utc_now_iso(),
                 }
                 append_jsonl(CALL_LOG_FILE, entry)
+                push_call_log_to_github(entry)
                 self.log_event("call_logged", {"id": entry["id"], "path": str(CALL_LOG_FILE)})
             except Exception as exc:  # noqa: BLE001
                 # Never silently drop a completed call from the wrap-up history.
@@ -8043,7 +8147,7 @@ def tool_route(tool_name: str):
 def call_log():
     payload = request.get_json(silent=True) or {}
     mode = str(payload.get("mode") or "voice").strip().lower()
-    if mode not in {"voice", "chat"}:
+    if mode not in {"voice", "chat", "mobile"}:
         mode = "voice"
     entry = {
         "id": f"call_{uuid.uuid4().hex[:10]}",
@@ -8063,12 +8167,54 @@ def call_log():
         "timestamp": utc_now_iso(),
     }
     append_jsonl(CALL_LOG_FILE, entry)
+    push_call_log_to_github(entry)
     return success_json({"ok": True, "entry_id": entry["id"]})
 
 
 @app.get("/api/call/history")
 def call_history():
     return success_json({"history": load_call_history()})
+
+
+@app.get("/api/qa/calls")
+def qa_calls():
+    """Full raw call log for quality testing — every logged conversation
+    (browser voice, chat, and mobile/Exotel) with full transcript, tool calls,
+    mode and timestamps. Unlike /api/call/history this does NOT strip the
+    transcript. Newest first.
+
+    Query params:
+      mode=voice|chat|mobile   filter by interaction mode
+      account_number=...       filter by customer account
+      limit=N                  cap the number of returned entries (default all)
+      format=jsonl             return raw JSONL (text/plain) for export instead of JSON
+    """
+    entries = read_jsonl(CALL_LOG_FILE)
+
+    mode_filter = str(request.args.get("mode") or "").strip().lower()
+    if mode_filter:
+        entries = [e for e in entries if str(e.get("mode") or "voice").strip().lower() == mode_filter]
+
+    account_filter = str(request.args.get("account_number") or "").strip()
+    if account_filter:
+        entries = [e for e in entries if str(e.get("account_number") or "") == account_filter]
+
+    # Newest first.
+    entries = list(reversed(entries))
+
+    limit_raw = str(request.args.get("limit") or "").strip()
+    if limit_raw:
+        try:
+            limit = max(0, int(limit_raw))
+            entries = entries[:limit]
+        except ValueError:
+            pass
+
+    if str(request.args.get("format") or "").strip().lower() == "jsonl":
+        body = "\n".join(json.dumps(e, ensure_ascii=False) for e in entries)
+        return Response(body, mimetype="text/plain; charset=utf-8")
+
+    return success_json({"count": len(entries), "calls": entries})
 
 
 def collections_reply_tone(assistant_text: str, tool_calls: list[dict[str, Any]]) -> str:
