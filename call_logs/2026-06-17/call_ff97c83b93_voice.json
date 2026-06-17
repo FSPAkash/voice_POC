@@ -1,0 +1,173 @@
+{
+  "id": "call_ff97c83b93",
+  "account_number": "DHL001",
+  "mode": "voice",
+  "disposition": "Call in progress",
+  "transcript": [
+    {
+      "id": "assistant_1781674007953",
+      "role": "assistant",
+      "text": "Good morning, मैं Yogesh DHL Express India से बोल रहा हूँ। क्या मैं Mr Anthony Gressive से बात कर रहा हूँ?",
+      "timestamp": "2026-06-17T05:26:47.955Z",
+      "status": "final"
+    }
+  ],
+  "tool_calls": [],
+  "duration_sec": 43,
+  "cost_usd": 0.0106,
+  "total_units": 106,
+  "mode_cost_usd": 0.0106,
+  "mode_tokens": 106,
+  "costs": {
+    "agent": {
+      "estimated_cost_usd": 0.0106,
+      "events": 1,
+      "model": "eleven_v3",
+      "response_usage": {
+        "audio_cached_input_tokens": 0,
+        "audio_input_tokens": 0,
+        "audio_output_tokens": 0,
+        "estimated_cost_usd": 0.0106,
+        "text_cached_input_tokens": 0,
+        "text_input_tokens": 0,
+        "text_output_tokens": 106
+      },
+      "total_tokens": 106,
+      "transcription_usage": {
+        "audio_input_tokens": 0,
+        "estimated_cost_usd": 0,
+        "model": "saaras:v3",
+        "text_input_tokens": 0,
+        "text_output_tokens": 0
+      }
+    },
+    "chat_agent": {
+      "estimated_cost_usd": 0,
+      "events": 0,
+      "model": "deterministic-call-engine",
+      "text_cached_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "total_tokens": 0
+    },
+    "combined": {
+      "estimated_cost_usd": 0.0106,
+      "total_tokens": 106
+    },
+    "language_coach": {
+      "estimated_cost_usd": 0,
+      "events": 0,
+      "model": "deterministic-language-coach",
+      "text_cached_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "total_tokens": 0
+    },
+    "price_table": {
+      "eleven_flash_v2_5": {
+        "text_output_per_million": 50
+      },
+      "eleven_multilingual_v2": {
+        "text_output_per_million": 50
+      },
+      "eleven_v3": {
+        "text_output_per_million": 100
+      },
+      "gpt-4.1": {
+        "text_cached_input_per_million": 0.5,
+        "text_input_per_million": 2,
+        "text_output_per_million": 8
+      },
+      "gpt-4.1-mini": {
+        "text_cached_input_per_million": 0.1,
+        "text_input_per_million": 0.4,
+        "text_output_per_million": 1.6
+      },
+      "gpt-4o-mini-transcribe": {
+        "audio_input_per_million": 3,
+        "text_input_per_million": 1.25,
+        "text_output_per_million": 5
+      },
+      "gpt-4o-transcribe": {
+        "audio_input_per_million": 6,
+        "text_input_per_million": 2.5,
+        "text_output_per_million": 10
+      },
+      "gpt-5-mini": {
+        "text_cached_input_per_million": 0.025,
+        "text_input_per_million": 0.25,
+        "text_output_per_million": 2
+      },
+      "gpt-5.4": {
+        "text_cached_input_per_million": 0.25,
+        "text_input_per_million": 2.5,
+        "text_output_per_million": 15
+      },
+      "gpt-5.4-mini": {
+        "text_cached_input_per_million": 0.075,
+        "text_input_per_million": 0.75,
+        "text_output_per_million": 4.5
+      },
+      "gpt-5.5": {
+        "text_cached_input_per_million": 0.5,
+        "text_input_per_million": 5,
+        "text_output_per_million": 30
+      },
+      "gpt-realtime": {
+        "audio_cached_input_per_million": 0.4,
+        "audio_input_per_million": 32,
+        "audio_output_per_million": 64,
+        "text_cached_input_per_million": 0.4,
+        "text_input_per_million": 4,
+        "text_output_per_million": 16
+      },
+      "gpt-realtime-mini": {
+        "audio_cached_input_per_million": 0.3,
+        "audio_input_per_million": 10,
+        "audio_output_per_million": 20,
+        "text_cached_input_per_million": 0.06,
+        "text_input_per_million": 0.6,
+        "text_output_per_million": 2.4
+      },
+      "saaras:v3": {
+        "audio_input_per_million": 86.688165
+      },
+      "saarika:v2.5": {
+        "audio_input_per_million": 86.688165
+      }
+    },
+    "price_table_version": "openai+elevenlabs+sarvam-stt-pricing-2026-06-07",
+    "session_id": "cost_session_b59db4d04cee",
+    "supervisor": {
+      "estimated_cost_usd": 0,
+      "events": 0,
+      "model": "deterministic-supervisor",
+      "text_cached_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "total_tokens": 0
+    },
+    "updated_at": "2026-06-17T05:26:51.776400+00:00"
+  },
+  "summary": {
+    "agent_commitments": [],
+    "agent_tone_assessment": "Agent remained polite and procedural, and the next steps were kept tied to DHL collections policy.",
+    "agreements": [],
+    "customer_mood": "calm",
+    "customer_requests": [],
+    "customer_sentiment_score": 0,
+    "disposition": "no-outcome",
+    "follow_ups": [
+      "Collections team should obtain a firm payment commitment in the next follow-up."
+    ],
+    "headline": "Call ended without a firm payment commitment",
+    "key_decisions": [],
+    "next_action": "Collections team should obtain a firm payment commitment in the next follow-up.",
+    "rapport_built": true,
+    "risk_flags": [
+      "No firm payment commitment was captured on the call."
+    ]
+  },
+  "notes": "",
+  "timestamp": "2026-06-17T05:27:26.337840+00:00"
+}
