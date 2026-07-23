@@ -1,0 +1,278 @@
+{
+  "id": "call_f57ffd32ea",
+  "account_number": "DHL001",
+  "mode": "voice",
+  "disposition": "Promise to pay logged",
+  "transcript": [
+    {
+      "id": "assistant_1784810538542",
+      "role": "assistant",
+      "text": "Good evening, मैं Yogesh DHL Express India से बोल रहा हूँ। क्या मैं Mr Anthony Gressive से बात कर रहा हूँ?",
+      "timestamp": "2026-07-23T12:42:18.542Z",
+      "status": "final"
+    },
+    {
+      "id": "customer_1784810548166_je3z",
+      "role": "customer",
+      "text": "Yes, speaking.",
+      "timestamp": "2026-07-23T12:42:28.166Z",
+      "status": "final"
+    },
+    {
+      "id": "assistant_1784810548654",
+      "role": "assistant",
+      "text": "Thank you for confirming. I am calling about your pending DHL invoices. The reason for my call is that Mind Your Business Inc. has a total outstanding of INR 57,920 across 3 overdue invoices. May I know the reason for the delay so that I can note it correctly?",
+      "timestamp": "2026-07-23T12:42:28.654Z",
+      "status": "final"
+    },
+    {
+      "id": "customer_1784810571897_juix",
+      "role": "customer",
+      "text": "No, I will release the payment tomorrow.",
+      "timestamp": "2026-07-23T12:42:51.897Z",
+      "status": "final"
+    },
+    {
+      "id": "assistant_1784810572255",
+      "role": "assistant",
+      "text": "Thank you. I have noted that payment will be released by tomorrow. Please ensure it is made by then. You have two approved payment options: the DHL MyBill self-serve portal, or Virtual Account Number bank transfer. Thank you for your time, Mr Anthony Gressive. Have a good day, goodbye.",
+      "timestamp": "2026-07-23T12:42:52.256Z",
+      "status": "final"
+    }
+  ],
+  "tool_calls": [
+    {
+      "args": {
+        "account_number": "DHL001",
+        "invoice_no": "DHL123456",
+        "notes": "No, I will release the payment tomorrow.",
+        "promise_date": "tomorrow"
+      },
+      "id": "call_d1ce54617383469f9070cfb5",
+      "name": "log_promise_to_pay",
+      "result": {
+        "account_number": "DHL001",
+        "notes": "No, I will release the payment tomorrow.",
+        "ok": true,
+        "promise_date": "tomorrow",
+        "ptp_id": "ptp_53761f6e"
+      },
+      "status": "completed",
+      "timestamp": "2026-07-23T12:42:52.232697+00:00"
+    },
+    {
+      "args": {
+        "account_number": "DHL001"
+      },
+      "id": "call_051aabc1dbbf49a185de7006",
+      "name": "get_invoices",
+      "result": {
+        "account_number": "DHL001",
+        "invoices": [
+          {
+            "amount": 13600,
+            "currency": "INR",
+            "due_date": "2026-01-31",
+            "history": [
+              "Customer earlier raised a price-list vs invoice mismatch on 1 waybill.",
+              "Issue resolved; credit note issued.",
+              "No further open dispute on this invoice — payment is simply pending."
+            ],
+            "invoice_date": "2026-01-01",
+            "invoice_no": "DHL123456",
+            "invoice_type": "Duty Import",
+            "overdue_days": 60
+          },
+          {
+            "amount": 34650,
+            "currency": "INR",
+            "due_date": "2026-02-22",
+            "history": [
+              "Customer logged an issue for 2 delayed shipments.",
+              "Issue resolved; credit note issued some time ago.",
+              "Week after the credit note, DHL called the customer; customer confirmed receipt of the credit note.",
+              "No further open dispute — payment is pending."
+            ],
+            "invoice_date": "2026-02-01",
+            "invoice_no": "DHL654321",
+            "invoice_type": "Freight Export",
+            "overdue_days": 45
+          },
+          {
+            "amount": 9670,
+            "currency": "INR",
+            "due_date": "2026-04-07",
+            "history": [
+              "No prior dispute logged. Standard freight import invoice, simply unpaid past the due date."
+            ],
+            "invoice_date": "2026-03-01",
+            "invoice_no": "DHL332241",
+            "invoice_type": "Freight Import",
+            "overdue_days": 30
+          }
+        ],
+        "ok": true,
+        "total_outstanding": 57920
+      },
+      "status": "completed",
+      "timestamp": "2026-07-23T12:42:28.621667+00:00"
+    }
+  ],
+  "duration_sec": 55,
+  "cost_usd": 0.068448,
+  "total_units": 689,
+  "mode_cost_usd": 0.068448,
+  "mode_tokens": 689,
+  "costs": {
+    "agent": {
+      "estimated_cost_usd": 0.068448,
+      "events": 3,
+      "model": "eleven_v3",
+      "response_usage": {
+        "audio_cached_input_tokens": 0,
+        "audio_input_tokens": 0,
+        "audio_output_tokens": 0,
+        "estimated_cost_usd": 0.0655,
+        "text_cached_input_tokens": 0,
+        "text_input_tokens": 0,
+        "text_output_tokens": 655
+      },
+      "total_tokens": 689,
+      "transcription_usage": {
+        "audio_input_tokens": 34,
+        "estimated_cost_usd": 0.002948,
+        "model": "saaras:v3",
+        "text_input_tokens": 0,
+        "text_output_tokens": 0
+      }
+    },
+    "chat_agent": {
+      "estimated_cost_usd": 0,
+      "events": 0,
+      "model": "deterministic-call-engine",
+      "text_cached_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "total_tokens": 0
+    },
+    "combined": {
+      "estimated_cost_usd": 0.068448,
+      "total_tokens": 689
+    },
+    "language_coach": {
+      "estimated_cost_usd": 0,
+      "events": 0,
+      "model": "deterministic-language-coach",
+      "text_cached_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "total_tokens": 0
+    },
+    "price_table": {
+      "eleven_flash_v2_5": {
+        "text_output_per_million": 50
+      },
+      "eleven_multilingual_v2": {
+        "text_output_per_million": 50
+      },
+      "eleven_v3": {
+        "text_output_per_million": 100
+      },
+      "gpt-4.1": {
+        "text_cached_input_per_million": 0.5,
+        "text_input_per_million": 2,
+        "text_output_per_million": 8
+      },
+      "gpt-4.1-mini": {
+        "text_cached_input_per_million": 0.1,
+        "text_input_per_million": 0.4,
+        "text_output_per_million": 1.6
+      },
+      "gpt-4o-mini-transcribe": {
+        "audio_input_per_million": 3,
+        "text_input_per_million": 1.25,
+        "text_output_per_million": 5
+      },
+      "gpt-4o-transcribe": {
+        "audio_input_per_million": 6,
+        "text_input_per_million": 2.5,
+        "text_output_per_million": 10
+      },
+      "gpt-5-mini": {
+        "text_cached_input_per_million": 0.025,
+        "text_input_per_million": 0.25,
+        "text_output_per_million": 2
+      },
+      "gpt-5.4": {
+        "text_cached_input_per_million": 0.25,
+        "text_input_per_million": 2.5,
+        "text_output_per_million": 15
+      },
+      "gpt-5.4-mini": {
+        "text_cached_input_per_million": 0.075,
+        "text_input_per_million": 0.75,
+        "text_output_per_million": 4.5
+      },
+      "gpt-5.5": {
+        "text_cached_input_per_million": 0.5,
+        "text_input_per_million": 5,
+        "text_output_per_million": 30
+      },
+      "gpt-realtime": {
+        "audio_cached_input_per_million": 0.4,
+        "audio_input_per_million": 32,
+        "audio_output_per_million": 64,
+        "text_cached_input_per_million": 0.4,
+        "text_input_per_million": 4,
+        "text_output_per_million": 16
+      },
+      "gpt-realtime-mini": {
+        "audio_cached_input_per_million": 0.3,
+        "audio_input_per_million": 10,
+        "audio_output_per_million": 20,
+        "text_cached_input_per_million": 0.06,
+        "text_input_per_million": 0.6,
+        "text_output_per_million": 2.4
+      },
+      "saaras:v3": {
+        "audio_input_per_million": 86.688165
+      },
+      "saarika:v2.5": {
+        "audio_input_per_million": 86.688165
+      }
+    },
+    "price_table_version": "openai+elevenlabs+sarvam-stt-pricing-2026-06-07",
+    "session_id": "cost_session_faca262aa9cb",
+    "supervisor": {
+      "estimated_cost_usd": 0,
+      "events": 0,
+      "model": "deterministic-supervisor",
+      "text_cached_input_tokens": 0,
+      "text_input_tokens": 0,
+      "text_output_tokens": 0,
+      "total_tokens": 0
+    },
+    "updated_at": "2026-07-23T12:42:53.791838+00:00"
+  },
+  "summary": {
+    "agent_commitments": [],
+    "agent_tone_assessment": "Agent remained polite and procedural, and the next steps were kept tied to DHL collections policy.",
+    "agreements": [
+      "Customer committed to make payment by tomorrow."
+    ],
+    "customer_mood": "cooperative",
+    "customer_requests": [],
+    "customer_sentiment_score": 1,
+    "disposition": "promise-to-pay",
+    "follow_ups": [],
+    "headline": "Mind Your Business Inc. committed to a payment date",
+    "key_decisions": [
+      "Promise-to-pay date recorded for tomorrow."
+    ],
+    "next_action": "Review the transcript and continue the collections workflow.",
+    "rapport_built": true,
+    "risk_flags": []
+  },
+  "notes": "",
+  "timestamp": "2026-07-23T12:43:10.306300+00:00"
+}
